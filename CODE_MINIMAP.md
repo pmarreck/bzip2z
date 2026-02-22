@@ -2,13 +2,13 @@
 
 - AGENTS.md: Local symlink to Peter's agent workflow and project rules (intentionally not tracked).
 - .gitignore: Ignore build outputs, local agent metadata, and OS cruft.
-- .github/workflows/ci.yml: GitHub CI matrix (native test job + 5 target artifact builds).
+- .github/workflows/ci.yml: GitHub CI matrix (native test job + 5 target artifact builds), with explicit permissions for Determinate Nix cache/OIDC.
 - LICENSE: Project license.
 - NEXT_STEPS.md: Short list of follow-on actions.
 - PLAN.md: Active implementation checklist with curiosity pokes.
 - build.zig: Zig build graph for core Zig library, C FFI static library, C CLI binaries, tests, bench, and fuzz targets.
 - build.zig.zon: Zig package manifest and version pin.
-- flake.nix: Nix dev shell plus flake-native CI checks/packages for macOS/Linux/Windows targets.
+- flake.nix: Nix dev shell for local systems plus Linux-hosted flake CI checks/packages that build/test macOS/Linux/Windows targets cross-platform.
 - build: Convenience wrapper for `zig build` with cache dir.
 - test: Convenience wrapper for `zig build test` + CLI tests.
 - src/lib.zig: Zig package entrypoint and version export.
@@ -22,5 +22,5 @@
 - bench/bench_bzip2.zig: Benchmark vs system bzip2.
 - fuzz/fuzz_stream_bzip2.zig: Fuzzing harness for round-trip safety.
 - cli/main.zig: Previous Zig CLI implementation retained for reference/migration continuity.
-- tests/cli_test: Bash CLI tests (uses capture.bash).
+- tests/cli_test: Bash CLI tests using `capture.bash` when present, with a verbatim in-memory `capture()` fallback for CI environments without dotfiles.
 - README.md: Overview, architecture, usage, benchmarks, and CI badges.

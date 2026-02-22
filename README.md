@@ -1,6 +1,6 @@
 # bzip2z
 
-[![Garnix CI](https://garnix.io/api/badges/pmarreck/bzip2z?branch=yolo)](https://garnix.io/repo/pmarreck/bzip2z)
+[![Garnix CI](https://img.shields.io/endpoint?url=https://garnix.io/api/badges/pmarreck/bzip2z%3Fbranch%3Dyolo)](https://garnix.io/repo/pmarreck/bzip2z)
 [![GitHub CI](https://github.com/pmarreck/bzip2z/actions/workflows/ci.yml/badge.svg)](https://github.com/pmarreck/bzip2z/actions/workflows/ci.yml)
 
 Clean-room, pure Zig reimplementation of bzip2 with a focus on correctness, clarity, and performance. Designed as a library dependency and a drop-in CLI replacement.

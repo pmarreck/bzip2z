@@ -1,5 +1,9 @@
 # PLAN
 
+- [x] Fix CI portability in `tests/cli_test` by using dotfiles `capture` when available and an in-memory fallback otherwise (no tempfile capture path). (completed 2026-02-22 14:41 EST)
+	Curiosity poke: Could shell or process-substitution differences on GitHub runners alter stdout/stderr capture ordering?
+- [x] Repair CI observability and Garnix host compatibility by fixing README Garnix badge endpoint and scoping flake checks/packages to Linux-hosted multi-target builds. (completed 2026-02-22 14:41 EST)
+	Curiosity poke: Does Garnix now report all target builds as successful after the new push, without unsupported host-system failures?
 - [x] Add pure-memory Zig core surface (`src/core.zig`) and C FFI adapter (`src/ffi.zig`, `c/include/bzip2z.h`). (completed 2026-02-22 13:25 EST)
 	Curiosity poke: Do any FFI exports leak file or stream I/O semantics?
 - [x] Replace Zig CLI adapter with C CLI adapter that only calls the FFI (`c/cli.c`) while keeping CLI behavior used by tests. (completed 2026-02-22 13:25 EST)

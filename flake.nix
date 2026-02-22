@@ -7,8 +7,9 @@
 
 	outputs = { self, nixpkgs }:
 		let
-			systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
-			forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
+			devSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+			ciHostSystems = [ "x86_64-linux" ];
+			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
 
 			mkCiPackage = pkgs: name: zigTarget: runTests:
 				pkgs.stdenv.mkDerivation {
@@ -46,7 +47,7 @@
 					'';
 				};
 		in {
-			devShells = forAllSystems (system: pkgs: {
+			devShells = forSystems devSystems (system: pkgs: {
 				default = pkgs.mkShell {
 					packages = [
 						pkgs.zig
@@ -64,42 +65,28 @@
 				};
 			});
 
-			packages = forAllSystems (system: pkgs:
+			packages = forSystems ciHostSystems (system: pkgs:
 				let
 					mk = name: target: runTests: mkCiPackage pkgs name target runTests;
-					defaultPackage = if system == "aarch64-darwin"
-						then mk "macos-aarch64" "aarch64-macos" false
-						else mk "linux-x86_64" "x86_64-linux-gnu" false;
 				in {
-					default = defaultPackage;
-				} // (if system == "x86_64-linux" then {
+					default = mk "linux-x86_64" "x86_64-linux-gnu" false;
 					ci-tests = mk "linux-x86_64-tests" "x86_64-linux-gnu" true;
 					ci-linux-x86_64 = mk "linux-x86_64" "x86_64-linux-gnu" false;
 					ci-linux-aarch64 = mk "linux-aarch64" "aarch64-linux-gnu" false;
+					ci-macos-aarch64 = mk "macos-aarch64" "aarch64-macos" false;
 					ci-windows-x86_64 = mk "windows-x86_64" "x86_64-windows-gnu" false;
 					ci-windows-aarch64 = mk "windows-aarch64" "aarch64-windows-gnu" false;
-				} else if system == "aarch64-darwin" then {
-					ci-tests = mk "macos-aarch64-tests" "aarch64-macos" true;
-					ci-macos-aarch64 = mk "macos-aarch64" "aarch64-macos" false;
-				} else if system == "aarch64-linux" then {
-					ci-linux-aarch64 = mk "linux-aarch64" "aarch64-linux-gnu" false;
-				} else {
-				}));
+				});
 
-			checks = forAllSystems (system: pkgs:
+			checks = forSystems ciHostSystems (system: pkgs:
 				let p = self.packages.${system};
-				in if system == "x86_64-linux" then {
+				in {
 					unit-and-cli-tests = p.ci-tests;
 					target-linux-x86_64 = p.ci-linux-x86_64;
 					target-linux-aarch64 = p.ci-linux-aarch64;
+					target-macos-aarch64 = p.ci-macos-aarch64;
 					target-windows-x86_64 = p.ci-windows-x86_64;
 					target-windows-aarch64 = p.ci-windows-aarch64;
-				} else if system == "aarch64-darwin" then {
-					unit-and-cli-tests = p.ci-tests;
-					target-macos-aarch64 = p.ci-macos-aarch64;
-				} else if system == "aarch64-linux" then {
-					target-linux-aarch64 = p.ci-linux-aarch64;
-				} else {
 				});
 		};
 }
