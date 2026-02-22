@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
 	const target = b.standardTargetOptions(.{});
-	const optimize = b.standardOptimizeOption(.{});
+	const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast)") orelse .ReleaseFast;
 
 	const lib_mod = b.addModule("bzip2z", .{
 		.root_source_file = b.path("src/lib.zig"),
@@ -17,31 +17,65 @@ pub fn build(b: *std.Build) void {
 	});
 	b.installArtifact(lib);
 
-	const cli_mod = b.createModule(.{
-		.root_source_file = b.path("cli/main.zig"),
+	const ffi_mod = b.createModule(.{
+		.root_source_file = b.path("src/ffi.zig"),
 		.target = target,
 		.optimize = optimize,
-		.imports = &.{
-			.{ .name = "bzip2z", .module = lib_mod },
-		},
 	});
+	const ffi_lib = b.addLibrary(.{
+		.name = "bzip2z_ffi",
+		.root_module = ffi_mod,
+		.linkage = .static,
+	});
+	ffi_lib.linkLibC();
+	b.installArtifact(ffi_lib);
 
 	const cli = b.addExecutable(.{
 		.name = "bzip2",
-		.root_module = cli_mod,
+		.root_module = b.createModule(.{
+			.target = target,
+			.optimize = optimize,
+		}),
 	});
+	cli.linkLibC();
+	cli.addIncludePath(b.path("c/include"));
+	cli.addCSourceFile(.{
+		.file = b.path("c/cli.c"),
+		.flags = &.{ "-std=c11" },
+	});
+	cli.linkLibrary(ffi_lib);
 	b.installArtifact(cli);
 
 	const bunzip2 = b.addExecutable(.{
 		.name = "bunzip2",
-		.root_module = cli_mod,
+		.root_module = b.createModule(.{
+			.target = target,
+			.optimize = optimize,
+		}),
 	});
+	bunzip2.linkLibC();
+	bunzip2.addIncludePath(b.path("c/include"));
+	bunzip2.addCSourceFile(.{
+		.file = b.path("c/cli.c"),
+		.flags = &.{ "-std=c11" },
+	});
+	bunzip2.linkLibrary(ffi_lib);
 	b.installArtifact(bunzip2);
 
 	const bzcat = b.addExecutable(.{
 		.name = "bzcat",
-		.root_module = cli_mod,
+		.root_module = b.createModule(.{
+			.target = target,
+			.optimize = optimize,
+		}),
 	});
+	bzcat.linkLibC();
+	bzcat.addIncludePath(b.path("c/include"));
+	bzcat.addCSourceFile(.{
+		.file = b.path("c/cli.c"),
+		.flags = &.{ "-std=c11" },
+	});
+	bzcat.linkLibrary(ffi_lib);
 	b.installArtifact(bzcat);
 
 	const run_cli = b.addRunArtifact(cli);

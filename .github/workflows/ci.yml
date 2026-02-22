@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-native:
+    name: test (native linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Run full test suite
+        run: nix develop -c ./test
+
+  build-targets:
+    name: build ${{ matrix.name }}
+    needs: [test-native]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            runner: macos-14
+            zig_target: aarch64-macos
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            zig_target: x86_64-linux-gnu
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            zig_target: aarch64-linux-gnu
+          - name: windows-x86_64
+            runner: ubuntu-latest
+            zig_target: x86_64-windows-gnu
+          - name: windows-aarch64
+            runner: ubuntu-latest
+            zig_target: aarch64-windows-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build target artifacts
+        run: nix develop -c ./build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts/${{ matrix.name }}/bin
+          cp -R zig-out/bin/. artifacts/${{ matrix.name }}/bin/
+          if [ -d zig-out/lib ]; then
+            mkdir -p artifacts/${{ matrix.name }}/lib
+            cp -R zig-out/lib/. artifacts/${{ matrix.name }}/lib/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bzip2z-${{ matrix.name }}
+          path: artifacts/${{ matrix.name }}
+          if-no-files-found: error

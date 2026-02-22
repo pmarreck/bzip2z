@@ -1,20 +1,26 @@
 # Code Minimap
 
-- AGENTS.md: Agent workflow and project rules (do not delete).
-- .gitignore: Ignore build outputs and OS cruft.
+- AGENTS.md: Local symlink to Peter's agent workflow and project rules (intentionally not tracked).
+- .gitignore: Ignore build outputs, local agent metadata, and OS cruft.
+- .github/workflows/ci.yml: GitHub CI matrix (native test job + 5 target artifact builds).
 - LICENSE: Project license.
 - NEXT_STEPS.md: Short list of follow-on actions.
-- build.zig: Zig build definitions (library, CLI binaries, core/lib/bench tests, bench, fuzz).
+- PLAN.md: Active implementation checklist with curiosity pokes.
+- build.zig: Zig build graph for core Zig library, C FFI static library, C CLI binaries, tests, bench, and fuzz targets.
 - build.zig.zon: Zig package manifest and version pin.
-- flake.nix: Nix dev shell with Zig, bzip2, and pbzip2.
+- flake.nix: Nix dev shell plus flake-native CI checks/packages for macOS/Linux/Windows targets.
 - build: Convenience wrapper for `zig build` with cache dir.
 - test: Convenience wrapper for `zig build test` + CLI tests.
-- src/lib.zig: Library entrypoint and version export.
-- src/bzip2.zig: Core bzip2 implementation + multi-block, pbzip2-style multi-stream, parallel decode, and legacy randomized-block compatibility handling for CRC-correct decode.
-- src/bzip2_test.zig: Unit + interop tests (system bzip2).
+- src/lib.zig: Zig package entrypoint and version export.
+- src/core.zig: Pure memory-only core API surface for compression/decompression.
+- src/ffi.zig: C ABI adapter that maps C structs/status codes to core operations.
+- src/bzip2.zig: Full algorithm implementation (BWT/MTF/Huffman/RLE), stream/file helpers, parallel paths, and compatibility logic.
+- src/bzip2_test.zig: Unit + interop tests (system bzip2/pbzip2 integration).
 - src/concurrency.zig: Bounded queue for worker threading.
+- c/include/bzip2z.h: Public C header for FFI symbols and options/results.
+- c/cli.c: C CLI adapter that performs all I/O and dogfoods the FFI.
 - bench/bench_bzip2.zig: Benchmark vs system bzip2.
 - fuzz/fuzz_stream_bzip2.zig: Fuzzing harness for round-trip safety.
-- cli/main.zig: bzip2-compatible CLI with opt-in pbzip2-style multi-stream (-j).
+- cli/main.zig: Previous Zig CLI implementation retained for reference/migration continuity.
 - tests/cli_test: Bash CLI tests (uses capture.bash).
-- README.md: Overview, usage, benchmarks (results + environment), credits.
+- README.md: Overview, architecture, usage, benchmarks, and CI badges.

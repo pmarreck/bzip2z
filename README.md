@@ -1,16 +1,27 @@
 # bzip2z
 
+[![Garnix CI](https://garnix.io/api/badges/pmarreck/bzip2z?branch=yolo)](https://garnix.io/repo/pmarreck/bzip2z)
+[![GitHub CI](https://github.com/pmarreck/bzip2z/actions/workflows/ci.yml/badge.svg)](https://github.com/pmarreck/bzip2z/actions/workflows/ci.yml)
+
 Clean-room, pure Zig reimplementation of bzip2 with a focus on correctness, clarity, and performance. Designed as a library dependency and a drop-in CLI replacement.
 
 ## Highlights
 
-- Pure Zig bzip2 encoder/decoder with SA-IS suffix array construction for BWT.
+- Pure Zig bzip2 core with SA-IS suffix array construction for BWT.
+- Stable C FFI for compression/decompression over in-memory buffers.
+- C CLI adapter that performs all I/O and talks only through the FFI.
 - Multi-block streaming support for large inputs.
 - Optional concurrent block compression (`-j N` / `CompressOptions.threads`).
 - Optional pbzip2-style multi-stream compression and parallel decompression (opt-in).
 - Concatenated stream decoding supported.
 - Legacy randomized-block decoding uses the canonical 512-entry compatibility sequence to preserve interoperable CRC validation.
 - CLI-compatible with bzip2 flags, plus `--about`.
+
+## Architecture
+
+- Core: `src/core.zig` exposes memory-only compression/decompression APIs.
+- Adapter: `src/ffi.zig` exports a C ABI (`c/include/bzip2z.h`) for external callers.
+- CLI: `c/cli.c` handles path/stdin/stdout behavior and calls only the FFI surface.
 
 ## Algorithmic improvements
 

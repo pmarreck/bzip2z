@@ -1,5 +1,6 @@
 const std = @import("std");
 
+pub const core = @import("core.zig");
 pub const bzip2 = @import("bzip2.zig");
 
 pub const version = struct {
