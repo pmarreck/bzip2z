@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -z "${ZIG_GLOBAL_CACHE_DIR:-}" ]; then
+	zig_global_cache_dir="${TMPDIR:-/tmp}/zig-global-cache"
+	export ZIG_GLOBAL_CACHE_DIR="$zig_global_cache_dir"
+fi
+
+zig build test
+
+./tests/cli_test

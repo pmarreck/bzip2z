@@ -1,0 +1,107 @@
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+	const target = b.standardTargetOptions(.{});
+	const optimize = b.standardOptimizeOption(.{});
+
+	const lib_mod = b.addModule("bzip2z", .{
+		.root_source_file = b.path("src/lib.zig"),
+		.target = target,
+		.optimize = optimize,
+	});
+
+	const lib = b.addLibrary(.{
+		.name = "bzip2z",
+		.root_module = lib_mod,
+		.linkage = .static,
+	});
+	b.installArtifact(lib);
+
+	const cli_mod = b.createModule(.{
+		.root_source_file = b.path("cli/main.zig"),
+		.target = target,
+		.optimize = optimize,
+		.imports = &.{
+			.{ .name = "bzip2z", .module = lib_mod },
+		},
+	});
+
+	const cli = b.addExecutable(.{
+		.name = "bzip2",
+		.root_module = cli_mod,
+	});
+	b.installArtifact(cli);
+
+	const bunzip2 = b.addExecutable(.{
+		.name = "bunzip2",
+		.root_module = cli_mod,
+	});
+	b.installArtifact(bunzip2);
+
+	const bzcat = b.addExecutable(.{
+		.name = "bzcat",
+		.root_module = cli_mod,
+	});
+	b.installArtifact(bzcat);
+
+	const run_cli = b.addRunArtifact(cli);
+	run_cli.step.dependOn(b.getInstallStep());
+	if (b.args) |args| {
+		run_cli.addArgs(args);
+	}
+	const run_step = b.step("run", "Run bzip2 CLI");
+	run_step.dependOn(&run_cli.step);
+
+	const test_filter = b.option([]const u8, "test-filter", "Run only tests containing this text");
+	var test_filters: []const []const u8 = &.{};
+	if (test_filter) |filter| {
+		test_filters = &.{filter};
+	}
+
+	const lib_tests = b.addTest(.{
+		.root_module = lib_mod,
+		.filters = test_filters,
+	});
+	const run_lib_tests = b.addRunArtifact(lib_tests);
+	const test_step = b.step("test", "Run unit tests");
+	test_step.dependOn(&run_lib_tests.step);
+
+	const bench_mod = b.createModule(.{
+		.root_source_file = b.path("bench/bench_bzip2.zig"),
+		.target = target,
+		.optimize = optimize,
+		.imports = &.{
+			.{ .name = "bzip2z", .module = lib_mod },
+		},
+	});
+	const bench = b.addExecutable(.{
+		.name = "bench-bzip2",
+		.root_module = bench_mod,
+	});
+	const install_bench = b.addInstallArtifact(bench, .{});
+	const bench_step = b.step("bench", "Build benchmarks");
+	bench_step.dependOn(&install_bench.step);
+
+	const bench_tests = b.addTest(.{
+		.root_module = bench_mod,
+		.filters = test_filters,
+	});
+	const run_bench_tests = b.addRunArtifact(bench_tests);
+	test_step.dependOn(&run_bench_tests.step);
+
+	const fuzz_mod = b.createModule(.{
+		.root_source_file = b.path("fuzz/fuzz_stream_bzip2.zig"),
+		.target = target,
+		.optimize = optimize,
+		.imports = &.{
+			.{ .name = "bzip2z", .module = lib_mod },
+		},
+	});
+	const fuzz = b.addExecutable(.{
+		.name = "fuzz-stream-bzip2",
+		.root_module = fuzz_mod,
+	});
+	const install_fuzz = b.addInstallArtifact(fuzz, .{});
+	const fuzz_step = b.step("fuzz", "Build fuzzers");
+	fuzz_step.dependOn(&install_fuzz.step);
+}

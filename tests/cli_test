@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$HOME/dotfiles/bin/src/capture.bash"
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build_cmd="$root_dir/build"
+
+work_dir="$TMPDIR/bzip2z-cli-$RANDOM-$$"
+mkdir -p "$work_dir"
+trap 'rm -rf "$work_dir"' EXIT
+
+cd "$root_dir"
+
+if ! command -v bzip2 >/dev/null 2>&1; then
+	echo "bzip2 not found in PATH; skipping CLI tests"
+	exit 0
+fi
+
+"$build_cmd" >/dev/null
+
+bin_dir="$root_dir/zig-out/bin"
+cli="$bin_dir/bzip2"
+
+if [ ! -x "$cli" ]; then
+	echo "bzip2 binary not found at $cli"
+	exit 1
+fi
+
+printf '%s' "The quick brown fox jumps over the lazy dog.
+Pack my box with five dozen liquor jugs." >"$work_dir/sample.txt"
+cp "$work_dir/sample.txt" "$work_dir/sample.orig"
+
+out=""
+err=""
+rc=0
+
+# about flag
+capture "$cli" --about
+if [ "$rc" -ne 0 ]; then
+	echo "--about failed"
+	exit 1
+fi
+
+# compress file
+capture "$cli" -k "$work_dir/sample.txt"
+if [ "$rc" -ne 0 ]; then
+	echo "compress failed"
+	exit 1
+fi
+if [ ! -f "$work_dir/sample.txt.bz2" ]; then
+	echo "compressed file missing"
+	exit 1
+fi
+
+# test integrity
+capture "$cli" -t "$work_dir/sample.txt.bz2"
+if [ "$rc" -ne 0 ]; then
+	echo "test mode failed"
+	exit 1
+fi
+
+# decompress to stdout
+capture "$cli" -dc "$work_dir/sample.txt.bz2"
+if [ "$rc" -ne 0 ]; then
+	echo "decompress to stdout failed"
+	exit 1
+fi
+
+if ! diff -u "$work_dir/sample.txt" <(printf '%s' "$out") >/dev/null; then
+	echo "stdout decompression mismatch"
+	exit 1
+fi
+
+# round-trip with system bzip2
+capture bzip2 -k -f "$work_dir/sample.txt"
+if [ "$rc" -ne 0 ]; then
+	echo "system bzip2 failed"
+	exit 1
+fi
+
+rm -f "$work_dir/sample.txt"
+
+capture "$cli" -dk "$work_dir/sample.txt.bz2"
+if [ "$rc" -ne 0 ]; then
+	echo "zig bzip2 decompress failed"
+	exit 1
+fi
+
+if ! diff -u "$work_dir/sample.orig" "$work_dir/sample.txt" >/dev/null; then
+	echo "round-trip mismatch"
+	exit 1
+fi
+
+# bzcat binary
+capture "$bin_dir/bzcat" "$work_dir/sample.txt.bz2"
+if [ "$rc" -ne 0 ]; then
+	echo "bzcat failed"
+	exit 1
+fi
+
+if ! diff -u "$work_dir/sample.orig" <(printf '%s' "$out") >/dev/null; then
+	echo "bzcat output mismatch"
+	exit 1
+fi
+
+# -j parallel multi-stream (round-trip, stdout)
+big_src="$work_dir/big.bin"
+big_orig="$work_dir/big.orig"
+head -c 2000000 </dev/urandom >"$big_src"
+cp "$big_src" "$big_orig"
+
+capture "$cli" -j 2 -k "$big_src"
+if [ "$rc" -ne 0 ]; then
+	echo "parallel compress failed"
+	exit 1
+fi
+if [ ! -f "$big_src.bz2" ]; then
+	echo "parallel compressed file missing"
+	exit 1
+fi
+
+big_out="$work_dir/big.out"
+if ! "$cli" -j 2 -dc "$big_src.bz2" >"$big_out"; then
+	echo "parallel decompress to stdout failed"
+	exit 1
+fi
+
+if ! diff -u "$big_orig" "$big_out" >/dev/null; then
+	echo "parallel stdout decompression mismatch"
+	exit 1
+fi
