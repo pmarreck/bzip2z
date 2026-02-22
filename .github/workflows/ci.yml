@@ -20,9 +20,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Enable Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Run full test suite
         run: nix develop -c ./test
 
@@ -55,9 +52,6 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Enable Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Build target artifacts
         run: nix develop -c ./build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
