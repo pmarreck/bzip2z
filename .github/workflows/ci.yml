@@ -19,6 +19,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: false
 
       - name: Run full test suite
         run: nix develop -c ./test
@@ -52,6 +54,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: false
 
       - name: Build target artifacts
         run: nix develop -c ./build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
