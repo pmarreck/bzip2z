@@ -350,11 +350,11 @@ pub fn main() !void {
 
 ```
 ./build
-./zig-out/bin/bzip2 -k file.txt
-./zig-out/bin/bzip2 -j 8 -k file.txt
-./zig-out/bin/bunzip2 file.txt.bz2
-./zig-out/bin/bzcat file.txt.bz2
-./zig-out/bin/bzip2 --about
+./zig-out/bin/bzip2z -k file.txt
+./zig-out/bin/bzip2z -j 8 -k file.txt
+./zig-out/bin/bunzip2z file.txt.bz2
+./zig-out/bin/bzcatz file.txt.bz2
+./zig-out/bin/bzip2z --about
 ```
 
 `-j N` opts into pbzip2-style concatenated streams for compression and enables parallel decompression for file inputs.
