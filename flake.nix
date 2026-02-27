@@ -31,8 +31,12 @@
 						export HOME="$TMPDIR/home"
 						mkdir -p "$HOME"
 						export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
-						${if runTests then "./test" else ":"}
-						./build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
+						${if runTests then ''
+						zig build test
+						patchShebangs tests/cli_test
+						bash tests/cli_test
+						'' else ":"}
+						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
 						runHook postBuild
 					'';
 
