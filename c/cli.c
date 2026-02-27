@@ -77,10 +77,10 @@ static const char* base_name(const char* path) {
 
 static cli_mode_t default_mode_from_program(const char* program) {
 	const char* base = base_name(program);
-	if (strcmp(base, "bunzip2") == 0 || strcmp(base, "bunzip2.exe") == 0) {
+	if (strcmp(base, "bunzip2z") == 0 || strcmp(base, "bunzip2z.exe") == 0) {
 		return MODE_DECOMPRESS;
 	}
-	if (strcmp(base, "bzcat") == 0 || strcmp(base, "bzcat.exe") == 0) {
+	if (strcmp(base, "bzcatz") == 0 || strcmp(base, "bzcatz.exe") == 0) {
 		return MODE_DECOMPRESS;
 	}
 	return MODE_COMPRESS;
@@ -88,7 +88,7 @@ static cli_mode_t default_mode_from_program(const char* program) {
 
 static int default_stdout_from_program(const char* program) {
 	const char* base = base_name(program);
-	return strcmp(base, "bzcat") == 0 || strcmp(base, "bzcat.exe") == 0;
+	return strcmp(base, "bzcatz") == 0 || strcmp(base, "bzcatz.exe") == 0;
 }
 
 static void usage(const char* program) {
@@ -116,9 +116,9 @@ static void usage(const char* program) {
 		" --about             show implementation summary\n"
 		"\n"
 		"Default mode depends on executable name:\n"
-		" bzip2   => compress\n"
-		" bunzip2 => decompress\n"
-		" bzcat   => decompress to stdout\n"
+		" bzip2z   => compress\n"
+		" bunzip2z => decompress\n"
+		" bzcatz   => decompress to stdout\n"
 		"\n"
 		"With no files, input is read from stdin.\n"
 		"Short options can be combined (example: -v4).\n",

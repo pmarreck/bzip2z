@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
 	b.installArtifact(ffi_lib);
 
 	const cli = b.addExecutable(.{
-		.name = "bzip2",
+		.name = "bzip2z",
 		.root_module = b.createModule(.{
 			.target = target,
 			.optimize = optimize,
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
 	b.installArtifact(cli);
 
 	const bunzip2 = b.addExecutable(.{
-		.name = "bunzip2",
+		.name = "bunzip2z",
 		.root_module = b.createModule(.{
 			.target = target,
 			.optimize = optimize,
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
 	b.installArtifact(bunzip2);
 
 	const bzcat = b.addExecutable(.{
-		.name = "bzcat",
+		.name = "bzcatz",
 		.root_module = b.createModule(.{
 			.target = target,
 			.optimize = optimize,
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
 	if (b.args) |args| {
 		run_cli.addArgs(args);
 	}
-	const run_step = b.step("run", "Run bzip2 CLI");
+	const run_step = b.step("run", "Run bzip2z CLI");
 	run_step.dependOn(&run_cli.step);
 
 	const test_filter = b.option([]const u8, "test-filter", "Run only tests containing this text");

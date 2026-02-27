@@ -152,10 +152,10 @@ fi
 "$build_cmd" >/dev/null
 
 bin_dir="$root_dir/zig-out/bin"
-cli="$bin_dir/bzip2"
+cli="$bin_dir/bzip2z"
 
 if [ ! -x "$cli" ]; then
-	echo "bzip2 binary not found at $cli"
+	echo "bzip2z binary not found at $cli"
 	exit 1
 fi
 
@@ -225,7 +225,7 @@ if ! diff -u "$work_dir/sample.orig" "$work_dir/sample.txt" >/dev/null; then
 fi
 
 # bzcat binary
-capture "$bin_dir/bzcat" "$work_dir/sample.txt.bz2"
+capture "$bin_dir/bzcatz" "$work_dir/sample.txt.bz2"
 if [ "$rc" -ne 0 ]; then
 	echo "bzcat failed"
 	exit 1
