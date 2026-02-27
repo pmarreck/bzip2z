@@ -33,7 +33,7 @@
 						export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
 						${if runTests then ''
 						zig build test
-						patchShebangs tests/cli_test
+						patchShebangs build tests/cli_test
 						bash tests/cli_test
 						'' else ":"}
 						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
