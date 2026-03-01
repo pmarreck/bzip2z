@@ -359,6 +359,17 @@ pub fn main() !void {
 
 `-j N` opts into pbzip2-style concatenated streams for compression and enables parallel decompression for file inputs.
 
+### Progress display
+
+When stderr is a TTY, bzip2z shows a progress bar during file operations. For stdin, progress defaults to indeterminate (spinner) since the total size is unknown. To get a determinate progress bar on stdin, provide the input size:
+
+```
+bzip2z --size 104857600 < bigfile.dat > bigfile.dat.bz2
+BZIP2Z_SIZE=104857600 bzip2z < bigfile.dat > bigfile.dat.bz2
+```
+
+Progress is suppressed with `-q` / `--quiet` or `PROGRESS=false`.
+
 ## Tests
 
 Run all tests:
