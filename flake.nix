@@ -42,6 +42,13 @@
 						${if runTests then ''
 						zig build test --system "$TMPDIR/zig-system-pkg"
 						patchShebangs build tests/cli_test
+						# Override build script to pass --system so cli_test doesn't hit network
+						cat > build <<BUILDEOF
+#!/usr/bin/env bash
+exec zig build --system "$TMPDIR/zig-system-pkg" "\$@"
+BUILDEOF
+						chmod +x build
+						patchShebangs build
 						bash tests/cli_test
 						'' else ":"}
 						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget} --system "$TMPDIR/zig-system-pkg"

@@ -16,9 +16,27 @@
         "type": "github"
       }
     },
+    "progrez": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772339631,
+        "narHash": "sha256-nNSeL0S/+t31filBMBS+UZTpk1UDF36SMOXJ9PqwIEo=",
+        "owner": "pmarreck",
+        "repo": "progrez",
+        "rev": "331455d8451d8367b9495cdc7f2a632dd535b33b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pmarreck",
+        "ref": "yolo",
+        "repo": "progrez",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "progrez": "progrez"
       }
     }
   },
