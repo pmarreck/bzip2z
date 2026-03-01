@@ -113,6 +113,12 @@ pub const CompressOptions = struct {
 	threads: usize = 1,
 	/// Emit concatenated streams (pbzip2-style multi-stream).
 	multi_stream: bool = false,
+	/// Progress callback: called with (bytes_processed, bytes_total, userdata) after each block.
+	on_progress: ?*const fn (u64, u64, ?*anyopaque) callconv(.c) void = null,
+	/// Opaque userdata pointer passed to on_progress callback.
+	progress_userdata: ?*anyopaque = null,
+	/// Total input bytes (for progress percentage). 0 = unknown.
+	progress_bytes_total: u64 = 0,
 
 	pub fn blockSizeBytes(self: CompressOptions) Error!usize {
 		if (self.level < 1 or self.level > 9) {
@@ -134,6 +140,12 @@ pub const DecompressOptions = struct {
 	threads: usize = 1,
 	/// Enable parallel decompression for concatenated streams.
 	parallel: bool = false,
+	/// Progress callback: called with (bytes_processed, bytes_total, userdata) after each block.
+	on_progress: ?*const fn (u64, u64, ?*anyopaque) callconv(.c) void = null,
+	/// Opaque userdata pointer passed to on_progress callback.
+	progress_userdata: ?*anyopaque = null,
+	/// Total input bytes (for progress percentage). 0 = unknown.
+	progress_bytes_total: u64 = 0,
 
 	pub fn resolvedThreads(self: DecompressOptions) usize {
 		if (self.threads == 0) {
@@ -401,6 +413,12 @@ pub const Decompressor = struct {
 	output: []u8,
 	output_len: usize,
 
+	// Progress callback
+	on_progress: ?*const fn (u64, u64, ?*anyopaque) callconv(.c) void = null,
+	progress_userdata: ?*anyopaque = null,
+	progress_bytes_total: u64 = 0,
+	progress_bytes_processed: u64 = 0,
+
 	pub fn init(allocator: Allocator) !Decompressor {
 		const block = try allocator.alloc(u8, MAX_BLOCK_SIZE + 1);
 		errdefer allocator.free(block);
@@ -513,6 +531,12 @@ pub const Decompressor = struct {
 
 				// Write decompressed output
 				_ = writer.write(self.output[0..self.output_len]) catch return Error.CorruptData;
+
+				// Fire progress callback
+				self.progress_bytes_processed += self.output_len;
+				if (self.on_progress) |cb| {
+					cb(self.progress_bytes_processed, self.progress_bytes_total, self.progress_userdata);
+				}
 
 				// Update stream CRC (rotate left by 1 and XOR with block CRC)
 				self.stream_crc = ((self.stream_crc << 1) | (self.stream_crc >> 31)) ^ self.stored_block_crc;
@@ -2141,6 +2165,7 @@ const BlockPrepared = struct {
 	lengths: [MAX_ALPHA_SIZE]u8,
 	codes: [MAX_ALPHA_SIZE]u32,
 	symbols: []u16,
+	original_len: usize = 0,
 
 	pub fn deinit(self: *BlockPrepared, allocator: Allocator) void {
 		allocator.free(self.symbols);
@@ -2289,6 +2314,7 @@ fn prepareBlock(allocator: Allocator, input: []const u8) !BlockPrepared {
 		.lengths = lengths,
 		.codes = codes,
 		.symbols = symbols_slice,
+		.original_len = input.len,
 	};
 }
 
@@ -2515,6 +2541,7 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 	const thread_count = options.resolvedThreads();
 	var block_reader = RleBlockReader(@TypeOf(reader)).init(reader);
 	defer block_reader.deinit(allocator);
+	var bytes_processed: u64 = 0;
 
 	if (!options.multi_stream) {
 		try writer.writeAll(&STREAM_MAGIC);
@@ -2538,6 +2565,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 
 				try writeBlock(&bits, &block);
 				stream_crc = updateStreamCrc(stream_crc, block.crc);
+				bytes_processed += block.original_len;
+				if (options.on_progress) |cb| {
+					cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+				}
 			}
 		} else {
 			const queue_capacity = @max(@as(usize, 1), thread_count * 2);
@@ -2600,6 +2631,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 									var block = entry.value;
 									try writeBlock(&bits, &block);
 									stream_crc = updateStreamCrc(stream_crc, block.crc);
+									bytes_processed += block.original_len;
+									if (options.on_progress) |cb| {
+										cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+									}
 									block.deinit(allocator);
 									next_write_index += 1;
 								}
@@ -2641,6 +2676,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 				var block = entry.value_ptr.*;
 				try writeBlock(&bits, &block);
 				stream_crc = updateStreamCrc(stream_crc, block.crc);
+				bytes_processed += block.original_len;
+				if (options.on_progress) |cb| {
+					cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+				}
 				block.deinit(allocator);
 			}
 		}
@@ -2663,6 +2702,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 			defer block.deinit(allocator);
 
 			try writeSingleBlockStream(writer, options.level, &block);
+			bytes_processed += block.original_len;
+			if (options.on_progress) |cb| {
+				cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+			}
 		}
 		return;
 	}
@@ -2726,6 +2769,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 						while (pending.fetchRemove(next_write_index)) |entry| {
 							var block = entry.value;
 							try writeSingleBlockStream(writer, options.level, &block);
+							bytes_processed += block.original_len;
+							if (options.on_progress) |cb| {
+								cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+							}
 							block.deinit(allocator);
 							next_write_index += 1;
 						}
@@ -2766,6 +2813,10 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 	while (it2.next()) |entry| {
 		var block = entry.value_ptr.*;
 		try writeSingleBlockStream(writer, options.level, &block);
+		bytes_processed += block.original_len;
+		if (options.on_progress) |cb| {
+			cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+		}
 		block.deinit(allocator);
 	}
 }
@@ -2784,25 +2835,32 @@ pub fn decompressNoCrc(allocator: Allocator, input: []const u8) ![]u8 {
 /// Decompress with options (parallel concatenated stream decode when enabled).
 pub fn decompressWithOptions(allocator: Allocator, input: []const u8, options: DecompressOptions) ![]u8 {
 	if (!options.parallel or options.resolvedThreads() <= 1) {
-		return decompressInternal(allocator, input, true);
+		return decompressInternalWithOptions(allocator, input, true, options);
 	}
 
 	const offsets = try findStreamOffsets(allocator, input);
 	defer allocator.free(offsets);
 
 	if (offsets.len <= 1 or offsets[0] != 0) {
-		return decompressInternal(allocator, input, true);
+		return decompressInternalWithOptions(allocator, input, true, options);
 	}
 
 	return decompressParallel(allocator, input, offsets, options) catch |err| {
-		const fallback = decompressInternal(allocator, input, true) catch return err;
+		const fallback = decompressInternalWithOptions(allocator, input, true, options) catch return err;
 		return fallback;
 	};
 }
 
 fn decompressInternal(allocator: Allocator, input: []const u8, check_crc: bool) ![]u8 {
+	return decompressInternalWithOptions(allocator, input, check_crc, .{});
+}
+
+fn decompressInternalWithOptions(allocator: Allocator, input: []const u8, check_crc: bool, options: DecompressOptions) ![]u8 {
 	var decompressor = try Decompressor.init(allocator);
 	defer decompressor.deinit();
+	decompressor.on_progress = options.on_progress;
+	decompressor.progress_userdata = options.progress_userdata;
+	decompressor.progress_bytes_total = options.progress_bytes_total;
 
 	var input_stream = std.io.fixedBufferStream(input);
 	var output_list: std.ArrayListUnmanaged(u8) = .empty;
@@ -3011,11 +3069,21 @@ fn decompressParallel(allocator: Allocator, input: []const u8, offsets: []const 
 
 	var completed: usize = 0;
 	var first_error: ?anyerror = null;
+	var bytes_processed: u64 = 0;
 	while (completed < stream_count) {
 		if (results.dequeue()) |result| {
 			completed += 1;
 			if (result.result) |slice| {
 				outputs[result.index] = slice;
+				// Fire progress callback with compressed stream size as increment
+				if (result.index + 1 < offsets.len) {
+					bytes_processed += offsets[result.index + 1] - offsets[result.index];
+				} else {
+					bytes_processed += input.len - offsets[result.index];
+				}
+				if (options.on_progress) |cb| {
+					cb(bytes_processed, options.progress_bytes_total, options.progress_userdata);
+				}
 			} else |err| {
 				if (first_error == null) first_error = err;
 			}
@@ -4211,4 +4279,67 @@ test "compress round-trip - binary" {
 	defer allocator.free(decompressed);
 
 	try std.testing.expectEqualSlices(u8, &original, decompressed);
+}
+
+test "compress calls on_progress callback" {
+	std.debug.print("\n>>> START: compress calls on_progress callback\n", .{});
+	defer std.debug.print("\n<<< END: compress calls on_progress callback\n", .{});
+	const allocator = std.testing.allocator;
+	const input = "Hello, world! This is a test of progress callbacks." ** 100;
+
+	const State = struct {
+		call_count: usize = 0,
+		last_bytes: u64 = 0,
+		total: u64 = 0,
+	};
+	var state = State{};
+
+	const result = try compressWithOptions(allocator, input, .{
+		.level = 1,
+		.on_progress = &struct {
+			fn cb(bytes_processed: u64, bytes_total: u64, userdata: ?*anyopaque) callconv(.c) void {
+				const s: *State = @ptrCast(@alignCast(userdata));
+				s.call_count += 1;
+				s.last_bytes = bytes_processed;
+				s.total = bytes_total;
+			}
+		}.cb,
+		.progress_userdata = @ptrCast(&state),
+		.progress_bytes_total = input.len,
+	});
+	defer allocator.free(result);
+
+	try std.testing.expect(state.call_count > 0);
+	try std.testing.expectEqual(@as(u64, input.len), state.total);
+}
+
+test "decompress calls on_progress callback" {
+	std.debug.print("\n>>> START: decompress calls on_progress callback\n", .{});
+	defer std.debug.print("\n<<< END: decompress calls on_progress callback\n", .{});
+	const allocator = std.testing.allocator;
+	const input = "Decompress progress test data string repeating." ** 50;
+
+	const compressed = try compressWithOptions(allocator, input, .{ .level = 1 });
+	defer allocator.free(compressed);
+
+	const State = struct {
+		call_count: usize = 0,
+		last_bytes: u64 = 0,
+	};
+	var state = State{};
+
+	const result = try decompressWithOptions(allocator, compressed, .{
+		.on_progress = &struct {
+			fn cb(bytes_processed: u64, _: u64, userdata: ?*anyopaque) callconv(.c) void {
+				const s: *State = @ptrCast(@alignCast(userdata));
+				s.call_count += 1;
+				s.last_bytes = bytes_processed;
+			}
+		}.cb,
+		.progress_userdata = @ptrCast(&state),
+		.progress_bytes_total = compressed.len,
+	});
+	defer allocator.free(result);
+
+	try std.testing.expect(state.call_count > 0);
 }
