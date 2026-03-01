@@ -1,4 +1,5 @@
 #include "bzip2z.h"
+#include "progrez.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -8,6 +9,8 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#else
+#include <unistd.h>
 #endif
 
 typedef enum cli_mode {
@@ -29,6 +32,7 @@ typedef struct cli_options {
 	int about;
 	int show_version;
 	int show_license;
+	uint64_t stdin_size;
 } cli_options_t;
 
 typedef struct file_list {
@@ -113,6 +117,7 @@ static void usage(const char* program) {
 		" --fast              same as -1\n"
 		" --best              same as -9\n"
 		" -j N                pbzip2-style multi-stream compression and parallel decode using N threads\n"
+		" --size N            hint for stdin input size (enables determinate progress)\n"
 		" --about             show implementation summary\n"
 		"\n"
 		"Default mode depends on executable name:\n"
@@ -121,7 +126,9 @@ static void usage(const char* program) {
 		" bzcatz   => decompress to stdout\n"
 		"\n"
 		"With no files, input is read from stdin.\n"
-		"Short options can be combined (example: -v4).\n",
+		"Short options can be combined (example: -v4).\n"
+		"\n"
+		"Environment: BZIP2Z_SIZE=N sets stdin size hint, PROGRESS=false disables progress.\n",
 		program
 	);
 }
@@ -185,6 +192,39 @@ static int parse_size(const char* text, size_t* value_out) {
 	return 1;
 }
 
+static void progress_callback(uint64_t bytes_done, uint64_t bytes_total, void* userdata) {
+	progrez_ctx* ctx = (progrez_ctx*)userdata;
+	(void)bytes_total;
+	progrez_update(ctx, 0, bytes_done);
+}
+
+static progrez_ctx* progress_start(const char* label, const char* path,
+                                   uint64_t bytes_total, const cli_options_t* opts) {
+	if (opts->quiet) return NULL;
+#ifdef _WIN32
+	if (!_isatty(_fileno(stderr))) return NULL;
+#else
+	if (!isatty(STDERR_FILENO)) return NULL;
+#endif
+
+	progrez_ctx* ctx = progrez_create(label);
+	if (ctx == NULL) return NULL;
+
+	progrez_set_identity(ctx, "bzip2z", path ? path : "stdin");
+	if (bytes_total > 0) {
+		progrez_set_determinate(ctx, 0, bytes_total);
+	} else {
+		progrez_set_indeterminate(ctx);
+	}
+	return ctx;
+}
+
+static void progress_end(progrez_ctx* ctx) {
+	if (ctx == NULL) return;
+	progrez_finish(ctx);
+	progrez_destroy(ctx);
+}
+
 static int parse_args(int argc, char** argv, cli_options_t* opts, file_list_t* files) {
 	int i;
 	for (i = 1; i < argc; i++) {
@@ -245,6 +285,14 @@ static int parse_args(int argc, char** argv, cli_options_t* opts, file_list_t* f
 		}
 		if (strcmp(arg, "--best") == 0) {
 			opts->level = 9;
+			continue;
+		}
+		if (strcmp(arg, "--size") == 0) {
+			if (i + 1 >= argc) return -1;
+			size_t val;
+			if (!parse_size(argv[i + 1], &val)) return -1;
+			opts->stdin_size = (uint64_t)val;
+			i++;
 			continue;
 		}
 		if (strcmp(arg, "-j") == 0) {
@@ -441,7 +489,7 @@ static int run_compress_bytes(
 	const cli_options_t* opts,
 	bzip2z_buffer_t* output
 ) {
-	bzip2z_compress_options_t copt;
+	bzip2z_compress_options_t copt = {0};
 	copt.level = opts->level;
 	copt.threads = opts->threads;
 	copt.multi_stream = opts->pbzip2 ? 1 : 0;
@@ -455,7 +503,7 @@ static int run_decompress_bytes(
 	int check_crc,
 	bzip2z_buffer_t* output
 ) {
-	bzip2z_decompress_options_t dopt;
+	bzip2z_decompress_options_t dopt = {0};
 	dopt.threads = opts->threads;
 	dopt.parallel = (opts->pbzip2 && opts->threads > 1) ? 1 : 0;
 	dopt.check_crc = check_crc ? 1 : 0;
@@ -473,8 +521,20 @@ static int compress_file(const char* path, const cli_options_t* opts) {
 		return -1;
 	}
 
-	status = run_compress_bytes(input, input_len, opts, &out);
+	progrez_ctx* pctx = progress_start("Compressing", path, (uint64_t)input_len, opts);
+
+	bzip2z_compress_options_t copt = {0};
+	copt.level = opts->level;
+	copt.threads = opts->threads;
+	copt.multi_stream = opts->pbzip2 ? 1 : 0;
+	copt.on_progress = pctx ? progress_callback : NULL;
+	copt.progress_userdata = pctx;
+	copt.progress_bytes_total = (uint64_t)input_len;
+	status = bzip2z_compress(input, input_len, &copt, &out);
+
 	free(input);
+	progress_end(pctx);
+
 	if (status != BZIP2Z_OK) {
 		return status;
 	}
@@ -526,8 +586,20 @@ static int decompress_file(const char* path, const cli_options_t* opts) {
 		return -1;
 	}
 
-	status = run_decompress_bytes(input, input_len, opts, 1, &out);
+	progrez_ctx* pctx = progress_start("Decompressing", path, (uint64_t)input_len, opts);
+
+	bzip2z_decompress_options_t dopt = {0};
+	dopt.threads = opts->threads;
+	dopt.parallel = (opts->pbzip2 && opts->threads > 1) ? 1 : 0;
+	dopt.check_crc = 1;
+	dopt.on_progress = pctx ? progress_callback : NULL;
+	dopt.progress_userdata = pctx;
+	dopt.progress_bytes_total = (uint64_t)input_len;
+	status = bzip2z_decompress(input, input_len, &dopt, &out);
+
 	free(input);
+	progress_end(pctx);
+
 	if (status != BZIP2Z_OK) {
 		return status;
 	}
@@ -578,8 +650,20 @@ static int test_file(const char* path, const cli_options_t* opts) {
 		return -1;
 	}
 
-	status = run_decompress_bytes(input, input_len, opts, 1, &out);
+	progrez_ctx* pctx = progress_start("Testing", path, (uint64_t)input_len, opts);
+
+	bzip2z_decompress_options_t dopt = {0};
+	dopt.threads = opts->threads;
+	dopt.parallel = (opts->pbzip2 && opts->threads > 1) ? 1 : 0;
+	dopt.check_crc = 1;
+	dopt.on_progress = pctx ? progress_callback : NULL;
+	dopt.progress_userdata = pctx;
+	dopt.progress_bytes_total = (uint64_t)input_len;
+	status = bzip2z_decompress(input, input_len, &dopt, &out);
+
 	free(input);
+	progress_end(pctx);
+
 	if (status != BZIP2Z_OK) {
 		return status;
 	}
@@ -598,12 +682,35 @@ static int process_stdin(const cli_options_t* opts) {
 		return 1;
 	}
 
+	progrez_ctx* pctx = progress_start(
+		opts->mode == MODE_COMPRESS ? "Compressing" :
+		opts->mode == MODE_TEST ? "Testing" : "Decompressing",
+		NULL,
+		opts->stdin_size > 0 ? opts->stdin_size : (uint64_t)input_len,
+		opts
+	);
+
 	if (opts->mode == MODE_COMPRESS) {
-		status = run_compress_bytes(input, input_len, opts, &out);
+		bzip2z_compress_options_t copt = {0};
+		copt.level = opts->level;
+		copt.threads = opts->threads;
+		copt.multi_stream = opts->pbzip2 ? 1 : 0;
+		copt.on_progress = pctx ? progress_callback : NULL;
+		copt.progress_userdata = pctx;
+		copt.progress_bytes_total = opts->stdin_size > 0 ? opts->stdin_size : (uint64_t)input_len;
+		status = bzip2z_compress(input, input_len, &copt, &out);
 	} else {
-		status = run_decompress_bytes(input, input_len, opts, opts->mode == MODE_TEST ? 1 : 1, &out);
+		bzip2z_decompress_options_t dopt = {0};
+		dopt.threads = opts->threads;
+		dopt.parallel = (opts->pbzip2 && opts->threads > 1) ? 1 : 0;
+		dopt.check_crc = 1;
+		dopt.on_progress = pctx ? progress_callback : NULL;
+		dopt.progress_userdata = pctx;
+		dopt.progress_bytes_total = opts->stdin_size > 0 ? opts->stdin_size : (uint64_t)input_len;
+		status = bzip2z_decompress(input, input_len, &dopt, &out);
 	}
 	free(input);
+	progress_end(pctx);
 
 	if (status != BZIP2Z_OK) {
 		if (!opts->quiet) {
@@ -646,6 +753,7 @@ int main(int argc, char** argv) {
 	opts.about = 0;
 	opts.show_version = 0;
 	opts.show_license = 0;
+	opts.stdin_size = 0;
 
 	file_list_init(&files);
 	parse_result = parse_args(argc, argv, &opts, &files);
@@ -675,6 +783,16 @@ int main(int argc, char** argv) {
 		license_info();
 		file_list_deinit(&files);
 		return 0;
+	}
+
+	if (opts.stdin_size == 0) {
+		const char* env_size = getenv("BZIP2Z_SIZE");
+		if (env_size != NULL) {
+			size_t val;
+			if (parse_size(env_size, &val)) {
+				opts.stdin_size = (uint64_t)val;
+			}
+		}
 	}
 
 	if (files.len == 0) {
