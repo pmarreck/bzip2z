@@ -1,5 +1,7 @@
 #include "bzip2z.h"
+#ifdef HAVE_PROGREZ
 #include "progrez.h"
+#endif
 
 #include <errno.h>
 #include <stdio.h>
@@ -192,6 +194,7 @@ static int parse_size(const char* text, size_t* value_out) {
 	return 1;
 }
 
+#ifdef HAVE_PROGREZ
 static void progress_callback(uint64_t bytes_done, uint64_t bytes_total, void* userdata) {
 	progrez_ctx* ctx = (progrez_ctx*)userdata;
 	(void)bytes_total;
@@ -224,6 +227,19 @@ static void progress_end(progrez_ctx* ctx) {
 	progrez_finish(ctx);
 	progrez_destroy(ctx);
 }
+#else
+/* No-op stubs when progrez is not available */
+typedef void progrez_ctx;
+static void progress_callback(uint64_t bytes_done, uint64_t bytes_total, void* userdata) {
+	(void)bytes_done; (void)bytes_total; (void)userdata;
+}
+static progrez_ctx* progress_start(const char* label, const char* path,
+                                   uint64_t bytes_total, const cli_options_t* opts) {
+	(void)label; (void)path; (void)bytes_total; (void)opts;
+	return NULL;
+}
+static void progress_end(progrez_ctx* ctx) { (void)ctx; }
+#endif
 
 static int parse_args(int argc, char** argv, cli_options_t* opts, file_list_t* files) {
 	int i;

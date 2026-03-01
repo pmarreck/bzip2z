@@ -30,11 +30,18 @@ pub fn build(b: *std.Build) void {
 	ffi_lib.linkLibC();
 	b.installArtifact(ffi_lib);
 
+	const is_windows = target.result.os.tag == .windows;
+
 	const progrez_dep = b.dependency("progrez", .{
 		.target = target,
 		.optimize = optimize,
 	});
-	const progrez_lib = progrez_dep.artifact("progrez");
+	const progrez_lib = if (!is_windows) progrez_dep.artifact("progrez") else null;
+
+	const cli_c_flags: []const []const u8 = if (!is_windows)
+		&.{ "-std=c11", "-DHAVE_PROGREZ=1" }
+	else
+		&.{ "-std=c11" };
 
 	const cli = b.addExecutable(.{
 		.name = "bzip2z",
@@ -47,11 +54,13 @@ pub fn build(b: *std.Build) void {
 	cli.addIncludePath(b.path("c/include"));
 	cli.addCSourceFile(.{
 		.file = b.path("c/cli.c"),
-		.flags = &.{ "-std=c11" },
+		.flags = cli_c_flags,
 	});
 	cli.linkLibrary(ffi_lib);
-	cli.linkLibrary(progrez_lib);
-	cli.root_module.addIncludePath(progrez_dep.path("include"));
+	if (progrez_lib) |pl| {
+		cli.linkLibrary(pl);
+		cli.root_module.addIncludePath(progrez_dep.path("include"));
+	}
 	b.installArtifact(cli);
 
 	const bunzip2 = b.addExecutable(.{
@@ -65,11 +74,13 @@ pub fn build(b: *std.Build) void {
 	bunzip2.addIncludePath(b.path("c/include"));
 	bunzip2.addCSourceFile(.{
 		.file = b.path("c/cli.c"),
-		.flags = &.{ "-std=c11" },
+		.flags = cli_c_flags,
 	});
 	bunzip2.linkLibrary(ffi_lib);
-	bunzip2.linkLibrary(progrez_lib);
-	bunzip2.root_module.addIncludePath(progrez_dep.path("include"));
+	if (progrez_lib) |pl| {
+		bunzip2.linkLibrary(pl);
+		bunzip2.root_module.addIncludePath(progrez_dep.path("include"));
+	}
 	b.installArtifact(bunzip2);
 
 	const bzcat = b.addExecutable(.{
@@ -83,11 +94,13 @@ pub fn build(b: *std.Build) void {
 	bzcat.addIncludePath(b.path("c/include"));
 	bzcat.addCSourceFile(.{
 		.file = b.path("c/cli.c"),
-		.flags = &.{ "-std=c11" },
+		.flags = cli_c_flags,
 	});
 	bzcat.linkLibrary(ffi_lib);
-	bzcat.linkLibrary(progrez_lib);
-	bzcat.root_module.addIncludePath(progrez_dep.path("include"));
+	if (progrez_lib) |pl| {
+		bzcat.linkLibrary(pl);
+		bzcat.root_module.addIncludePath(progrez_dep.path("include"));
+	}
 	b.installArtifact(bzcat);
 
 	const run_cli = b.addRunArtifact(cli);
