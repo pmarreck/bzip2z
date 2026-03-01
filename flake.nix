@@ -3,9 +3,13 @@
 
 	inputs = {
 		nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+		progrez = {
+			url = "github:pmarreck/progrez/yolo";
+			flake = false;
+		};
 	};
 
-	outputs = { self, nixpkgs }:
+	outputs = { self, nixpkgs, progrez }:
 		let
 			devSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 			ciHostSystems = [ "x86_64-linux" ];
@@ -26,17 +30,21 @@
 						pkgs.pbzip2
 					];
 
-					buildPhase = ''
+					buildPhase = let
+						zigPkgHash = "progrez-0.1.0-0YJXrmrBAQCatqwMnYaaPA13IM-90s2PnLoflNf8eoeS";
+					in ''
 						runHook preBuild
 						export HOME="$TMPDIR/home"
 						mkdir -p "$HOME"
 						export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+						mkdir -p "$TMPDIR/zig-system-pkg/${zigPkgHash}"
+						cp -r ${progrez}/* "$TMPDIR/zig-system-pkg/${zigPkgHash}/"
 						${if runTests then ''
-						zig build test
+						zig build test --system "$TMPDIR/zig-system-pkg"
 						patchShebangs build tests/cli_test
 						bash tests/cli_test
 						'' else ":"}
-						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
+						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget} --system "$TMPDIR/zig-system-pkg"
 						runHook postBuild
 					'';
 
