@@ -22,16 +22,24 @@ typedef struct bzip2z_buffer {
 	size_t len;
 } bzip2z_buffer_t;
 
+typedef void (*bzip2z_progress_fn)(uint64_t bytes_processed, uint64_t bytes_total, void* userdata);
+
 typedef struct bzip2z_compress_options {
 	uint8_t level;
 	size_t threads;
 	uint8_t multi_stream;
+	bzip2z_progress_fn on_progress;
+	void* progress_userdata;
+	uint64_t progress_bytes_total;
 } bzip2z_compress_options_t;
 
 typedef struct bzip2z_decompress_options {
 	size_t threads;
 	uint8_t parallel;
 	uint8_t check_crc;
+	bzip2z_progress_fn on_progress;
+	void* progress_userdata;
+	uint64_t progress_bytes_total;
 } bzip2z_decompress_options_t;
 
 int bzip2z_compress(

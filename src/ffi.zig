@@ -16,16 +16,24 @@ pub const Bzip2zBuffer = extern struct {
 	len: usize,
 };
 
+pub const Bzip2zProgressFn = ?*const fn (u64, u64, ?*anyopaque) callconv(.c) void;
+
 pub const Bzip2zCompressOptions = extern struct {
 	level: u8,
 	threads: usize,
 	multi_stream: u8,
+	on_progress: Bzip2zProgressFn,
+	progress_userdata: ?*anyopaque,
+	progress_bytes_total: u64,
 };
 
 pub const Bzip2zDecompressOptions = extern struct {
 	threads: usize,
 	parallel: u8,
 	check_crc: u8,
+	on_progress: Bzip2zProgressFn,
+	progress_userdata: ?*anyopaque,
+	progress_bytes_total: u64,
 };
 
 fn mapError(err: anyerror) Bzip2zStatus {
@@ -53,6 +61,9 @@ fn compressOptionsFromC(options: ?*const Bzip2zCompressOptions) core.CompressOpt
 			.level = if (opt.level == 0) 9 else opt.level,
 			.threads = opt.threads,
 			.multi_stream = opt.multi_stream != 0,
+			.on_progress = opt.on_progress,
+			.progress_userdata = opt.progress_userdata,
+			.progress_bytes_total = opt.progress_bytes_total,
 		};
 	}
 	return .{};
@@ -63,6 +74,9 @@ fn decompressOptionsFromC(options: ?*const Bzip2zDecompressOptions) core.Decompr
 		return .{
 			.threads = opt.threads,
 			.parallel = opt.parallel != 0,
+			.on_progress = opt.on_progress,
+			.progress_userdata = opt.progress_userdata,
+			.progress_bytes_total = opt.progress_bytes_total,
 		};
 	}
 	return .{};
