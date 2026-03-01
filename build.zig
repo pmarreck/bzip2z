@@ -30,6 +30,12 @@ pub fn build(b: *std.Build) void {
 	ffi_lib.linkLibC();
 	b.installArtifact(ffi_lib);
 
+	const progrez_dep = b.dependency("progrez", .{
+		.target = target,
+		.optimize = optimize,
+	});
+	const progrez_lib = progrez_dep.artifact("progrez");
+
 	const cli = b.addExecutable(.{
 		.name = "bzip2z",
 		.root_module = b.createModule(.{
@@ -44,6 +50,8 @@ pub fn build(b: *std.Build) void {
 		.flags = &.{ "-std=c11" },
 	});
 	cli.linkLibrary(ffi_lib);
+	cli.linkLibrary(progrez_lib);
+	cli.root_module.addIncludePath(progrez_dep.path("include"));
 	b.installArtifact(cli);
 
 	const bunzip2 = b.addExecutable(.{
@@ -60,6 +68,8 @@ pub fn build(b: *std.Build) void {
 		.flags = &.{ "-std=c11" },
 	});
 	bunzip2.linkLibrary(ffi_lib);
+	bunzip2.linkLibrary(progrez_lib);
+	bunzip2.root_module.addIncludePath(progrez_dep.path("include"));
 	b.installArtifact(bunzip2);
 
 	const bzcat = b.addExecutable(.{
@@ -76,6 +86,8 @@ pub fn build(b: *std.Build) void {
 		.flags = &.{ "-std=c11" },
 	});
 	bzcat.linkLibrary(ffi_lib);
+	bzcat.linkLibrary(progrez_lib);
+	bzcat.root_module.addIncludePath(progrez_dep.path("include"));
 	b.installArtifact(bzcat);
 
 	const run_cli = b.addRunArtifact(cli);

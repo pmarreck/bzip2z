@@ -12,4 +12,10 @@
 		"tests",
 	},
 	.fingerprint = 0x8e3eb16965d939b,
+	.dependencies = .{
+		.progrez = .{
+			.url = "https://github.com/pmarreck/progrez/archive/yolo.tar.gz",
+			.hash = "progrez-0.1.0-0YJXrmrBAQCatqwMnYaaPA13IM-90s2PnLoflNf8eoeS",
+		},
+	},
 }
