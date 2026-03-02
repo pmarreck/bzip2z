@@ -19,11 +19,11 @@
     "progrez": {
       "flake": false,
       "locked": {
-        "lastModified": 1772339631,
-        "narHash": "sha256-nNSeL0S/+t31filBMBS+UZTpk1UDF36SMOXJ9PqwIEo=",
+        "lastModified": 1772469665,
+        "narHash": "sha256-yeOFp+wOILhYGfgUzvXxbxkaWGGzYssNrvYNWYuQ308=",
         "owner": "pmarreck",
         "repo": "progrez",
-        "rev": "331455d8451d8367b9495cdc7f2a632dd535b33b",
+        "rev": "f338840d063e05cb6f886e365a8ddb1ade4a2bcd",
         "type": "github"
       },
       "original": {

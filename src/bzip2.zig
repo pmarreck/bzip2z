@@ -3304,8 +3304,6 @@ pub fn decompressFile(allocator: Allocator, path: []const u8) ![]u8 {
 // ============ Tests ============
 
 test "CRC32 bzip2 - basic" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - basic\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - basic\n", .{});
 	var crc = Crc32Bzip2.init();
 	crc.updateSlice("hello");
 	const result = crc.final();
@@ -3313,8 +3311,6 @@ test "CRC32 bzip2 - basic" {
 }
 
 test "CRC32 bzip2 - standard test vector" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - standard test vector\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - standard test vector\n", .{});
 	// The standard CRC-32/BZIP2 check value for "123456789" is 0xfc891918
 	// See: https://reveng.sourceforge.io/crc-catalogue/17plus.htm
 	var crc = Crc32Bzip2.init();
@@ -3324,16 +3320,12 @@ test "CRC32 bzip2 - standard test vector" {
 }
 
 test "CRC32 bzip2 - empty" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - empty\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - empty\n", .{});
 	var crc = Crc32Bzip2.init();
 	const result = crc.final();
 	try std.testing.expectEqual(@as(u32, 0), result);
 }
 
 test "CRC32 bzip2 - incremental equals batch" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - incremental equals batch\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - incremental equals batch\n", .{});
 	var crc1 = Crc32Bzip2.init();
 	crc1.update('h');
 	crc1.update('e');
@@ -3365,8 +3357,6 @@ test "derandomize compatibility sequence reaches legacy 129th toggle point" {
 // These tests verify individual pieces of the SA-IS algorithm
 
 test "SA-IS - suffix array for 'banana'" {
-	std.debug.print("\n>>> START: SA-IS - suffix array for 'banana'\n", .{});
-	defer std.debug.print("\n<<< END: SA-IS - suffix array for 'banana'\n", .{});
 	// "banana$" - well-known test case
 	// Sorted suffixes: $, a$, ana$, anana$, banana$, na$, nana$
 	// SA = [6, 5, 3, 1, 0, 4, 2] (positions of suffixes in sorted order)
@@ -3393,8 +3383,6 @@ test "SA-IS - suffix array for 'banana'" {
 }
 
 test "SA-IS - suffix array for 'abracadabra'" {
-	std.debug.print("\n>>> START: SA-IS - suffix array for 'abracadabra'\n", .{});
-	defer std.debug.print("\n<<< END: SA-IS - suffix array for 'abracadabra'\n", .{});
 	const allocator = std.testing.allocator;
 	const text = "abracadabra";
 
@@ -3412,8 +3400,6 @@ test "SA-IS - suffix array for 'abracadabra'" {
 }
 
 test "SA-IS - suffix array for repetitive 'aaa'" {
-	std.debug.print("\n>>> START: SA-IS - suffix array for repetitive 'aaa'\n", .{});
-	defer std.debug.print("\n<<< END: SA-IS - suffix array for repetitive 'aaa'\n", .{});
 	const allocator = std.testing.allocator;
 	const text = "aaa";
 
@@ -3429,8 +3415,6 @@ test "SA-IS - suffix array for repetitive 'aaa'" {
 }
 
 test "SA-IS - BWT uses correct suffix array" {
-	std.debug.print("\n>>> START: SA-IS - BWT uses correct suffix array\n", .{});
-	defer std.debug.print("\n<<< END: SA-IS - BWT uses correct suffix array\n", .{});
 	const allocator = std.testing.allocator;
 
 	// Test "banana" BWT
@@ -3442,8 +3426,6 @@ test "SA-IS - BWT uses correct suffix array" {
 }
 
 test "SA-IS - verify suffix array sorted at various sizes" {
-	std.debug.print("\n>>> START: SA-IS - verify suffix array sorted at various sizes\n", .{});
-	defer std.debug.print("\n<<< END: SA-IS - verify suffix array sorted at various sizes\n", .{});
 	const allocator = std.testing.allocator;
 
 	// Verify SA correctness at various sizes
@@ -3458,11 +3440,6 @@ test "SA-IS - verify suffix array sorted at various sizes" {
 		for (text, 0..) |*b, i| {
 			b.* = @truncate((i *% 31 +% 17) ^ (i >> 8));
 		}
-
-		// Verify input data checksum before SA-IS
-		var checksum: u32 = 0;
-		for (text) |b| checksum = checksum *% 31 +% b;
-		std.debug.print("\n  size={} checksum={}\n", .{ size, checksum });
 
 		const sa = try buildSuffixArraySAIS(allocator, text);
 		defer allocator.free(sa);
@@ -3489,14 +3466,10 @@ test "SA-IS - verify suffix array sorted at various sizes" {
 }
 
 test "stream magic" {
-	std.debug.print("\n>>> START: stream magic\n", .{});
-	defer std.debug.print("\n<<< END: stream magic\n", .{});
 	try std.testing.expectEqualSlices(u8, "BZh", &STREAM_MAGIC);
 }
 
 test "block magic values" {
-	std.debug.print("\n>>> START: block magic values\n", .{});
-	defer std.debug.print("\n<<< END: block magic values\n", .{});
 	try std.testing.expectEqual(@as(u48, 0x314159265359), BLOCK_MAGIC);
 	try std.testing.expectEqual(@as(u48, 0x177245385090), FOOTER_MAGIC);
 }
@@ -3504,8 +3477,6 @@ test "block magic values" {
 // ============ BitReader Tests ============
 
 test "BitReader - read aligned bytes" {
-	std.debug.print("\n>>> START: BitReader - read aligned bytes\n", .{});
-	defer std.debug.print("\n<<< END: BitReader - read aligned bytes\n", .{});
 	const data = [_]u8{ 0xAB, 0xCD, 0xEF };
 	var stream = std.io.fixedBufferStream(&data);
 	var reader = BitReader(@TypeOf(stream.reader())).init(stream.reader());
@@ -3519,8 +3490,6 @@ test "BitReader - read aligned bytes" {
 }
 
 test "BitReader - read unaligned bits" {
-	std.debug.print("\n>>> START: BitReader - read unaligned bits\n", .{});
-	defer std.debug.print("\n<<< END: BitReader - read unaligned bits\n", .{});
 	// Binary: 1010 1100 1101 0011
 	const data = [_]u8{ 0xAC, 0xD3 };
 	var stream = std.io.fixedBufferStream(&data);
@@ -3540,8 +3509,6 @@ test "BitReader - read unaligned bits" {
 }
 
 test "BitReader - read single bits" {
-	std.debug.print("\n>>> START: BitReader - read single bits\n", .{});
-	defer std.debug.print("\n<<< END: BitReader - read single bits\n", .{});
 	// Binary: 1010 0101
 	const data = [_]u8{0xA5};
 	var stream = std.io.fixedBufferStream(&data);
@@ -3561,8 +3528,6 @@ test "BitReader - read single bits" {
 // ============ Huffman Table Tests ============
 
 test "HuffmanTable - simple 2 symbol table" {
-	std.debug.print("\n>>> START: HuffmanTable - simple 2 symbol table\n", .{});
-	defer std.debug.print("\n<<< END: HuffmanTable - simple 2 symbol table\n", .{});
 	var table = HuffmanTable.init();
 
 	// Simple table: symbol 0 has code "0" (length 1), symbol 1 has code "1" (length 1)
@@ -3585,8 +3550,6 @@ test "HuffmanTable - simple 2 symbol table" {
 }
 
 test "HuffmanTable - varying code lengths" {
-	std.debug.print("\n>>> START: HuffmanTable - varying code lengths\n", .{});
-	defer std.debug.print("\n<<< END: HuffmanTable - varying code lengths\n", .{});
 	var table = HuffmanTable.init();
 
 	// Table: A=1bit, B=2bits, C=3bits, D=3bits
@@ -3612,8 +3575,6 @@ test "HuffmanTable - varying code lengths" {
 // ============ Inverse BWT Tests ============
 
 test "inverse BWT - simple known transformation" {
-	std.debug.print("\n>>> START: inverse BWT - simple known transformation\n", .{});
-	defer std.debug.print("\n<<< END: inverse BWT - simple known transformation\n", .{});
 	// Test with a known BWT transformation
 	// Original: "banana"
 	// BWT output: "annb$aa" where $ marks the end
@@ -3654,8 +3615,6 @@ test "inverse BWT - simple known transformation" {
 }
 
 test "RLE bijective base-2 encoding - known values" {
-	std.debug.print("\n>>> START: RLE bijective base-2 encoding - known values\n", .{});
-	defer std.debug.print("\n<<< END: RLE bijective base-2 encoding - known values\n", .{});
 	// In bzip2's bijective base-2 system:
 	// RUNA (sym=0) contributes (0+1)*power = 1*power
 	// RUNB (sym=1) contributes (1+1)*power = 2*power
@@ -3694,8 +3653,6 @@ test "RLE bijective base-2 encoding - known values" {
 }
 
 test "initial RLE expansion - known patterns" {
-	std.debug.print("\n>>> START: initial RLE expansion - known patterns\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE expansion - known patterns\n", .{});
 	const allocator = std.testing.allocator;
 
 	var decompressor = try Decompressor.init(allocator);
@@ -3718,8 +3675,6 @@ test "initial RLE expansion - known patterns" {
 }
 
 test "initial RLE expansion - no runs" {
-	std.debug.print("\n>>> START: initial RLE expansion - no runs\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE expansion - no runs\n", .{});
 	const allocator = std.testing.allocator;
 
 	var decompressor = try Decompressor.init(allocator);
@@ -3738,8 +3693,6 @@ test "initial RLE expansion - no runs" {
 }
 
 test "initial RLE expansion - mixed content" {
-	std.debug.print("\n>>> START: initial RLE expansion - mixed content\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE expansion - mixed content\n", .{});
 	const allocator = std.testing.allocator;
 
 	var decompressor = try Decompressor.init(allocator);
@@ -3765,8 +3718,6 @@ test "initial RLE expansion - mixed content" {
 // ============ Compression Tests (TDD - write tests first!) ============
 
 test "initial RLE encode - no runs" {
-	std.debug.print("\n>>> START: initial RLE encode - no runs\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE encode - no runs\n", .{});
 	const allocator = std.testing.allocator;
 	// Input without runs of 4+ identical bytes should pass through unchanged
 	const input = "ABCDEF";
@@ -3776,8 +3727,6 @@ test "initial RLE encode - no runs" {
 }
 
 test "initial RLE encode - single run" {
-	std.debug.print("\n>>> START: initial RLE encode - single run\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE encode - single run\n", .{});
 	const allocator = std.testing.allocator;
 	// 10 A's should become "AAAA" + chr(6)
 	const input = "AAAAAAAAAA";
@@ -3789,8 +3738,6 @@ test "initial RLE encode - single run" {
 }
 
 test "initial RLE encode - exactly 4" {
-	std.debug.print("\n>>> START: initial RLE encode - exactly 4\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE encode - exactly 4\n", .{});
 	const allocator = std.testing.allocator;
 	// Exactly 4 identical bytes should become "XXXX" + chr(0)
 	const input = "AAAA";
@@ -3802,8 +3749,6 @@ test "initial RLE encode - exactly 4" {
 }
 
 test "initial RLE encode - mixed content" {
-	std.debug.print("\n>>> START: initial RLE encode - mixed content\n", .{});
-	defer std.debug.print("\n<<< END: initial RLE encode - mixed content\n", .{});
 	const allocator = std.testing.allocator;
 	// "XY" + 6 A's + "Z" should become "XY" + "AAAA" + chr(2) + "Z"
 	const input = "XYAAAAAAZ";
@@ -3857,8 +3802,6 @@ test "RLE block reader caps encoded length" {
 }
 
 test "BWT forward transform - simple" {
-	std.debug.print("\n>>> START: BWT forward transform - simple\n", .{});
-	defer std.debug.print("\n<<< END: BWT forward transform - simple\n", .{});
 	const allocator = std.testing.allocator;
 	// BWT of "banana" is well-known: last column is "annb$aa" or similar
 	// For "aaab": rotations are aaab, aaba, abaa, baaa
@@ -3871,8 +3814,6 @@ test "BWT forward transform - simple" {
 }
 
 test "BWT forward transform - hello" {
-	std.debug.print("\n>>> START: BWT forward transform - hello\n", .{});
-	defer std.debug.print("\n<<< END: BWT forward transform - hello\n", .{});
 	const allocator = std.testing.allocator;
 	// BWT of "hello": rotations sorted give last column
 	// Rotations: hello, elloh, llohe, lohel, ohell
@@ -3886,8 +3827,6 @@ test "BWT forward transform - hello" {
 }
 
 test "BWT round-trip" {
-	std.debug.print("\n>>> START: BWT round-trip\n", .{});
-	defer std.debug.print("\n<<< END: BWT round-trip\n", .{});
 	const allocator = std.testing.allocator;
 	const original = "the quick brown fox";
 
@@ -3910,8 +3849,6 @@ test "BWT round-trip" {
 }
 
 test "BWT round-trip - pattern data sizes" {
-	std.debug.print("\n>>> START: BWT round-trip - pattern data sizes\n", .{});
-	defer std.debug.print("\n<<< END: BWT round-trip - pattern data sizes\n", .{});
 	const allocator = std.testing.allocator;
 
 	// Test various sizes - smaller sizes to avoid memory pressure issues
@@ -3959,8 +3896,6 @@ test "BWT round-trip - pattern data sizes" {
 }
 
 test "BWT performance - 50KB should complete in under 500ms" {
-	std.debug.print("\n>>> START: BWT performance - 50KB should complete in under 500ms\n", .{});
-	defer std.debug.print("\n<<< END: BWT performance - 50KB should complete in under 500ms\n", .{});
 	const allocator = std.testing.allocator;
 
 	// Generate 50KB of test data
@@ -3989,8 +3924,6 @@ test "BWT performance - 50KB should complete in under 500ms" {
 }
 
 test "MTF encode - simple" {
-	std.debug.print("\n>>> START: MTF encode - simple\n", .{});
-	defer std.debug.print("\n<<< END: MTF encode - simple\n", .{});
 	const allocator = std.testing.allocator;
 	// MTF encoding: each byte is replaced by its position in a list that's
 	// updated after each byte (move accessed item to front)
@@ -4006,8 +3939,6 @@ test "MTF encode - simple" {
 }
 
 test "MTF encode - mixed" {
-	std.debug.print("\n>>> START: MTF encode - mixed\n", .{});
-	defer std.debug.print("\n<<< END: MTF encode - mixed\n", .{});
 	const allocator = std.testing.allocator;
 	// For "abab" with alphabet {a, b}:
 	// Initial MTF list: [a, b]
@@ -4021,8 +3952,6 @@ test "MTF encode - mixed" {
 }
 
 test "RUNA/RUNB encode - single zero" {
-	std.debug.print("\n>>> START: RUNA/RUNB encode - single zero\n", .{});
-	defer std.debug.print("\n<<< END: RUNA/RUNB encode - single zero\n", .{});
 	// A single zero in MTF output becomes RUNA (symbol 0)
 	// run_len=1 -> RUNA
 	const result = encodeZeroRun(1);
@@ -4031,8 +3960,6 @@ test "RUNA/RUNB encode - single zero" {
 }
 
 test "RUNA/RUNB encode - two zeros" {
-	std.debug.print("\n>>> START: RUNA/RUNB encode - two zeros\n", .{});
-	defer std.debug.print("\n<<< END: RUNA/RUNB encode - two zeros\n", .{});
 	// run_len=2 -> RUNB
 	const result = encodeZeroRun(2);
 	try std.testing.expectEqual(@as(usize, 1), result.len);
@@ -4040,8 +3967,6 @@ test "RUNA/RUNB encode - two zeros" {
 }
 
 test "RUNA/RUNB encode - three zeros" {
-	std.debug.print("\n>>> START: RUNA/RUNB encode - three zeros\n", .{});
-	defer std.debug.print("\n<<< END: RUNA/RUNB encode - three zeros\n", .{});
 	// run_len=3 -> RUNA, RUNA (1 + 2 = 3)
 	const result = encodeZeroRun(3);
 	try std.testing.expectEqual(@as(usize, 2), result.len);
@@ -4050,8 +3975,6 @@ test "RUNA/RUNB encode - three zeros" {
 }
 
 test "RUNA/RUNB encode - forty zeros" {
-	std.debug.print("\n>>> START: RUNA/RUNB encode - forty zeros\n", .{});
-	defer std.debug.print("\n<<< END: RUNA/RUNB encode - forty zeros\n", .{});
 	// run_len=40 -> specific sequence
 	// 40 = 2 + 2 + 4 + 16 + 16 = RUNB + RUNA + RUNA + RUNB + RUNA
 	const result = encodeZeroRun(40);
@@ -4064,8 +3987,6 @@ test "RUNA/RUNB encode - forty zeros" {
 }
 
 test "BitWriter - write bytes" {
-	std.debug.print("\n>>> START: BitWriter - write bytes\n", .{});
-	defer std.debug.print("\n<<< END: BitWriter - write bytes\n", .{});
 	const allocator = std.testing.allocator;
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
@@ -4083,8 +4004,6 @@ test "BitWriter - write bytes" {
 }
 
 test "BitWriter - write unaligned bits" {
-	std.debug.print("\n>>> START: BitWriter - write unaligned bits\n", .{});
-	defer std.debug.print("\n<<< END: BitWriter - write unaligned bits\n", .{});
 	const allocator = std.testing.allocator;
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
@@ -4104,8 +4023,6 @@ test "BitWriter - write unaligned bits" {
 }
 
 test "BitWriter - write 32 bits" {
-	std.debug.print("\n>>> START: BitWriter - write 32 bits\n", .{});
-	defer std.debug.print("\n<<< END: BitWriter - write 32 bits\n", .{});
 	const allocator = std.testing.allocator;
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
@@ -4122,8 +4039,6 @@ test "BitWriter - write 32 bits" {
 }
 
 test "BitWriter - write single bits" {
-	std.debug.print("\n>>> START: BitWriter - write single bits\n", .{});
-	defer std.debug.print("\n<<< END: BitWriter - write single bits\n", .{});
 	const allocator = std.testing.allocator;
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
@@ -4147,8 +4062,6 @@ test "BitWriter - write single bits" {
 }
 
 test "buildHuffmanCodes - uniform lengths" {
-	std.debug.print("\n>>> START: buildHuffmanCodes - uniform lengths\n", .{});
-	defer std.debug.print("\n<<< END: buildHuffmanCodes - uniform lengths\n", .{});
 	// All 4 symbols with length 2 should get codes 00, 01, 10, 11
 	const lengths = [_]u8{ 2, 2, 2, 2 };
 	const codes = buildHuffmanCodes(&lengths, 4);
@@ -4160,8 +4073,6 @@ test "buildHuffmanCodes - uniform lengths" {
 }
 
 test "buildHuffmanCodes - canonical varying lengths" {
-	std.debug.print("\n>>> START: buildHuffmanCodes - canonical varying lengths\n", .{});
-	defer std.debug.print("\n<<< END: buildHuffmanCodes - canonical varying lengths\n", .{});
 	// Lengths: 1, 2, 3, 3 should give canonical codes: 0, 10, 110, 111
 	const lengths = [_]u8{ 1, 2, 3, 3 };
 	const codes = buildHuffmanCodes(&lengths, 4);
@@ -4173,8 +4084,6 @@ test "buildHuffmanCodes - canonical varying lengths" {
 }
 
 test "Huffman encode-decode round-trip" {
-	std.debug.print("\n>>> START: Huffman encode-decode round-trip\n", .{});
-	defer std.debug.print("\n<<< END: Huffman encode-decode round-trip\n", .{});
 	const allocator = std.testing.allocator;
 
 	// Build codes with known lengths
@@ -4216,8 +4125,6 @@ test "Huffman encode-decode round-trip" {
 }
 
 test "compress - valid header" {
-	std.debug.print("\n>>> START: compress - valid header\n", .{});
-	defer std.debug.print("\n<<< END: compress - valid header\n", .{});
 	const allocator = std.testing.allocator;
 	const original = "Hello, World!";
 
@@ -4230,8 +4137,6 @@ test "compress - valid header" {
 }
 
 test "compress round-trip - simple" {
-	std.debug.print("\n>>> START: compress round-trip - simple\n", .{});
-	defer std.debug.print("\n<<< END: compress round-trip - simple\n", .{});
 	const allocator = std.testing.allocator;
 	const original = "Hello, World!";
 
@@ -4249,8 +4154,6 @@ test "compress round-trip - simple" {
 }
 
 test "compress round-trip - repetitive" {
-	std.debug.print("\n>>> START: compress round-trip - repetitive\n", .{});
-	defer std.debug.print("\n<<< END: compress round-trip - repetitive\n", .{});
 	const allocator = std.testing.allocator;
 	const original = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 40 A's
 
@@ -4264,8 +4167,6 @@ test "compress round-trip - repetitive" {
 }
 
 test "compress round-trip - binary" {
-	std.debug.print("\n>>> START: compress round-trip - binary\n", .{});
-	defer std.debug.print("\n<<< END: compress round-trip - binary\n", .{});
 	const allocator = std.testing.allocator;
 	var original: [256]u8 = undefined;
 	for (0..256) |i| {
@@ -4282,8 +4183,6 @@ test "compress round-trip - binary" {
 }
 
 test "compress calls on_progress callback" {
-	std.debug.print("\n>>> START: compress calls on_progress callback\n", .{});
-	defer std.debug.print("\n<<< END: compress calls on_progress callback\n", .{});
 	const allocator = std.testing.allocator;
 	const input = "Hello, world! This is a test of progress callbacks." ** 100;
 
@@ -4314,8 +4213,6 @@ test "compress calls on_progress callback" {
 }
 
 test "decompress calls on_progress callback" {
-	std.debug.print("\n>>> START: decompress calls on_progress callback\n", .{});
-	defer std.debug.print("\n<<< END: decompress calls on_progress callback\n", .{});
 	const allocator = std.testing.allocator;
 	const input = "Decompress progress test data string repeating." ** 50;
 

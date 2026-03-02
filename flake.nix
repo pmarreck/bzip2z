@@ -31,7 +31,7 @@
 					];
 
 					buildPhase = let
-						zigPkgHash = "progrez-0.1.0-0YJXrmrBAQCatqwMnYaaPA13IM-90s2PnLoflNf8eoeS";
+						zigPkgHash = "progrez-0.1.0-0YJXrt4AAgAa3oScbj1pXFwos1rhFzR50M6sQSJBmZHg";
 					in ''
 						runHook preBuild
 						export HOME="$TMPDIR/home"

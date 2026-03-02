@@ -15,7 +15,7 @@
 	.dependencies = .{
 		.progrez = .{
 			.url = "https://github.com/pmarreck/progrez/archive/yolo.tar.gz",
-			.hash = "progrez-0.1.0-0YJXrmrBAQCatqwMnYaaPA13IM-90s2PnLoflNf8eoeS",
+			.hash = "progrez-0.1.0-0YJXrt4AAgAa3oScbj1pXFwos1rhFzR50M6sQSJBmZHg",
 		},
 	},
 }

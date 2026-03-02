@@ -86,8 +86,6 @@ fn requirePbzip2(allocator: std.mem.Allocator) !void {
 // ============ Unit Tests ============
 
 test "CRC32 bzip2 - known values" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - known values\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - known values\n", .{});
 	// Test with known input
 	var crc = bzip2.Crc32Bzip2.init();
 	crc.updateSlice("hello world");
@@ -102,8 +100,6 @@ test "CRC32 bzip2 - known values" {
 }
 
 test "CRC32 bzip2 - empty input" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - empty input\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - empty input\n", .{});
 	var crc = bzip2.Crc32Bzip2.init();
 	const result = crc.final();
 	// Empty CRC should be 0 (after XOR with 0xFFFFFFFF twice)
@@ -111,8 +107,6 @@ test "CRC32 bzip2 - empty input" {
 }
 
 test "CRC32 bzip2 - incremental update" {
-	std.debug.print("\n>>> START: CRC32 bzip2 - incremental update\n", .{});
-	defer std.debug.print("\n<<< END: CRC32 bzip2 - incremental update\n", .{});
 	var crc1 = bzip2.Crc32Bzip2.init();
 	crc1.updateSlice("hello ");
 	crc1.updateSlice("world");
@@ -124,14 +118,10 @@ test "CRC32 bzip2 - incremental update" {
 }
 
 test "stream magic validation" {
-	std.debug.print("\n>>> START: stream magic validation\n", .{});
-	defer std.debug.print("\n<<< END: stream magic validation\n", .{});
 	try testing.expectEqualSlices(u8, "BZh", &bzip2.STREAM_MAGIC);
 }
 
 test "block magic values" {
-	std.debug.print("\n>>> START: block magic values\n", .{});
-	defer std.debug.print("\n<<< END: block magic values\n", .{});
 	// Block magic is pi digits: 0x314159265359
 	try testing.expectEqual(@as(u48, 0x314159265359), bzip2.BLOCK_MAGIC);
 	// Footer magic is sqrt(pi) digits: 0x177245385090
@@ -141,8 +131,6 @@ test "block magic values" {
 // ============ Integration Tests with System bzip2 ============
 
 test "detect invalid bzip2 header" {
-	std.debug.print("\n>>> START: detect invalid bzip2 header\n", .{});
-	defer std.debug.print("\n<<< END: detect invalid bzip2 header\n", .{});
 	const allocator = testing.allocator;
 
 	// Invalid magic
@@ -160,8 +148,6 @@ test "detect invalid bzip2 header" {
 }
 
 test "detect invalid block size" {
-	std.debug.print("\n>>> START: detect invalid block size\n", .{});
-	defer std.debug.print("\n<<< END: detect invalid block size\n", .{});
 	const allocator = testing.allocator;
 
 	// Valid magic but invalid block size ('0' is not valid, must be '1'-'9')
@@ -181,8 +167,6 @@ test "detect invalid block size" {
 // ============ Real-World File Tests ============
 
 test "decompress real bzip2 file from tmp" {
-	std.debug.print("\n>>> START: decompress real bzip2 file from tmp\n", .{});
-	defer std.debug.print("\n<<< END: decompress real bzip2 file from tmp\n", .{});
 	const allocator = testing.allocator;
 	try requireSystemBzip2(allocator);
 
@@ -235,8 +219,6 @@ test "decompress real bzip2 file from tmp" {
 }
 
 test "round-trip with system bzip2 via files" {
-	std.debug.print("\n>>> START: round-trip with system bzip2 via files\n", .{});
-	defer std.debug.print("\n<<< END: round-trip with system bzip2 via files\n", .{});
 	const allocator = testing.allocator;
 	try requireSystemBzip2(allocator);
 
@@ -288,8 +270,6 @@ test "round-trip with system bzip2 via files" {
 }
 
 test "decompress system bzip2 output - simple text" {
-	std.debug.print("\n>>> START: decompress system bzip2 output - simple text\n", .{});
-	defer std.debug.print("\n<<< END: decompress system bzip2 output - simple text\n", .{});
 	const allocator = testing.allocator;
 	try requireSystemBzip2(allocator);
 
@@ -339,8 +319,6 @@ test "decompress system bzip2 output - simple text" {
 }
 
 test "decompress system bzip2 output - multiple patterns" {
-	std.debug.print("\n>>> START: decompress system bzip2 output - multiple patterns\n", .{});
-	defer std.debug.print("\n<<< END: decompress system bzip2 output - multiple patterns\n", .{});
 	const allocator = testing.allocator;
 	try requireSystemBzip2(allocator);
 
@@ -409,8 +387,6 @@ test "decompress system bzip2 output - multiple patterns" {
 }
 
 test "decompress system bzip2 output - binary data" {
-	std.debug.print("\n>>> START: decompress system bzip2 output - binary data\n", .{});
-	defer std.debug.print("\n<<< END: decompress system bzip2 output - binary data\n", .{});
 	const allocator = testing.allocator;
 	try requireSystemBzip2(allocator);
 
@@ -621,8 +597,6 @@ test "interop multi-stream - zig compress multi-stream, system decompress" {
 }
 
 test "parallel decompress - zig multi-stream" {
-	std.debug.print("\n>>> START: parallel decompress - zig multi-stream\n", .{});
-	defer std.debug.print("\n<<< END: parallel decompress - zig multi-stream\n", .{});
 	const allocator = testing.allocator;
 
 	const size: usize = 1_200_000;
@@ -650,8 +624,6 @@ test "parallel decompress - zig multi-stream" {
 }
 
 test "parallel file decode streams without large allocs" {
-	std.debug.print("\n>>> START: parallel file decode streams without large allocs\n", .{});
-	defer std.debug.print("\n<<< END: parallel file decode streams without large allocs\n", .{});
 	const allocator = testing.allocator;
 
 	const size: usize = 7_000_000;
@@ -713,8 +685,6 @@ test "parallel file decode streams without large allocs" {
 }
 
 test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
-	std.debug.print("\n>>> START: interop pbzip2 multistream - pbzip2 compress, zig decompress\n", .{});
-	defer std.debug.print("\n<<< END: interop pbzip2 multistream - pbzip2 compress, zig decompress\n", .{});
 	const allocator = testing.allocator;
 	try requirePbzip2(allocator);
 
@@ -771,8 +741,6 @@ test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
 }
 
 test "interop pbzip2 multistream - zig compress, pbzip2 decompress" {
-	std.debug.print("\n>>> START: interop pbzip2 multistream - zig compress, pbzip2 decompress\n", .{});
-	defer std.debug.print("\n<<< END: interop pbzip2 multistream - zig compress, pbzip2 decompress\n", .{});
 	const allocator = testing.allocator;
 	try requirePbzip2(allocator);
 
