@@ -829,8 +829,24 @@ pub const Decompressor = struct {
 	fn expandInitialRle(self: *Decompressor) Error!void {
 		// bzip2's initial RLE: runs of 4+ identical bytes are encoded as
 		// XXXX + count, where count (0-255) indicates additional copies beyond 4.
-		// We expand these runs in place using the block buffer as scratch space.
+		// We expand these runs using the block buffer as scratch space.
+		//
+		// The compressor limits blocks by RLE-ENCODED size, so the expanded
+		// output can exceed MAX_BLOCK_SIZE. We compute the needed size first
+		// and grow buffers if necessary.
 
+		// First pass: compute expanded size
+		const needed = self.computeRleExpandedSize() orelse return Error.CorruptData;
+
+		// Grow buffers if expansion exceeds current capacity
+		if (needed > self.block.len) {
+			self.block = self.allocator.realloc(self.block, needed) catch return Error.OutOfMemory;
+		}
+		if (needed > self.output.len) {
+			self.output = self.allocator.realloc(self.output, needed) catch return Error.OutOfMemory;
+		}
+
+		// Second pass: expand
 		var read_pos: usize = 0;
 		var write_pos: usize = 0;
 
@@ -846,29 +862,18 @@ pub const Decompressor = struct {
 			{
 				read_pos += 3; // Skip the 3 additional copies (total 4)
 
-				// Read the count byte
 				if (read_pos >= self.output_len) {
-					// Count byte missing - malformed data
 					return Error.CorruptData;
 				}
 				const count = self.output[read_pos];
 				read_pos += 1;
 
-				// Output 4 + count copies of byte
 				const total = @as(usize, 4) + @as(usize, count);
-				if (write_pos + total > MAX_BLOCK_SIZE) {
-					return Error.OutputOverflow;
-				}
-
 				for (0..total) |_| {
 					self.block[write_pos] = byte;
 					write_pos += 1;
 				}
 			} else {
-				// Single byte, just copy
-				if (write_pos >= MAX_BLOCK_SIZE) {
-					return Error.OutputOverflow;
-				}
 				self.block[write_pos] = byte;
 				write_pos += 1;
 			}
@@ -877,6 +882,34 @@ pub const Decompressor = struct {
 		// Copy expanded data back to output
 		@memcpy(self.output[0..write_pos], self.block[0..write_pos]);
 		self.output_len = write_pos;
+	}
+
+	/// Compute the expanded size of RLE data in self.output without modifying anything.
+	/// Returns null if the RLE data is malformed (missing count byte).
+	fn computeRleExpandedSize(self: *const Decompressor) ?usize {
+		var read_pos: usize = 0;
+		var expanded: usize = 0;
+
+		while (read_pos < self.output_len) {
+			const byte = self.output[read_pos];
+			read_pos += 1;
+
+			if (read_pos + 3 <= self.output_len and
+				self.output[read_pos] == byte and
+				self.output[read_pos + 1] == byte and
+				self.output[read_pos + 2] == byte)
+			{
+				read_pos += 3;
+				if (read_pos >= self.output_len) return null;
+				const count = self.output[read_pos];
+				read_pos += 1;
+				expanded += @as(usize, 4) + @as(usize, count);
+			} else {
+				expanded += 1;
+			}
+		}
+
+		return expanded;
 	}
 
 	fn buildInverseBwt(self: *Decompressor) Error!void {
@@ -4239,4 +4272,74 @@ test "decompress calls on_progress callback" {
 	defer allocator.free(result);
 
 	try std.testing.expect(state.call_count > 0);
+}
+
+test "multi-block decompress round-trip" {
+	const allocator = std.testing.allocator;
+
+	// Test multiple sizes that span block boundaries (900KB per block at level 9).
+	const sizes = [_]usize{ 900_200, 1_800_000, 5_000_000, 10_000_000 };
+
+	for (sizes) |total_size| {
+		const full_data = try allocator.alloc(u8, total_size);
+		defer allocator.free(full_data);
+
+		// Prepend 200 bytes of 0x81 header, then patterned data
+		const header_len = @min(200, total_size);
+		for (full_data[0..header_len]) |*b| b.* = 0x81;
+		for (full_data[header_len..], 0..) |*byte, i| {
+			byte.* = @truncate(i *% 7 +% (i >> 16));
+		}
+
+		const compressed = try compress(allocator, full_data);
+		defer allocator.free(compressed);
+
+		const decompressed = try decompress(allocator, compressed);
+		defer allocator.free(decompressed);
+
+		try std.testing.expectEqual(full_data.len, decompressed.len);
+		try std.testing.expectEqualSlices(u8, full_data, decompressed);
+	}
+}
+
+test "large multi-block compress round-trip with progress callback" {
+	const allocator = std.testing.allocator;
+
+	// Simulate what blar does: compress large data with a progress callback
+	const total_size = 5_000_000;
+	const data = try allocator.alloc(u8, total_size);
+	defer allocator.free(data);
+
+	for (data, 0..) |*byte, i| {
+		byte.* = @truncate(i *% 13 +% (i >> 12));
+	}
+
+	const State = struct {
+		call_count: usize = 0,
+		last_bytes: u64 = 0,
+		last_total: u64 = 0,
+	};
+	var state = State{};
+
+	const compressed = try compressWithOptions(allocator, data, .{
+		.on_progress = &struct {
+			fn cb(bytes_processed: u64, bytes_total: u64, userdata: ?*anyopaque) callconv(.c) void {
+				const s: *State = @ptrCast(@alignCast(userdata));
+				s.call_count += 1;
+				s.last_bytes = bytes_processed;
+				s.last_total = bytes_total;
+			}
+		}.cb,
+		.progress_userdata = @ptrCast(&state),
+		.progress_bytes_total = total_size,
+	});
+	defer allocator.free(compressed);
+
+	try std.testing.expect(state.call_count > 0);
+
+	// Now decompress to verify round-trip
+	const decompressed = try decompress(allocator, compressed);
+	defer allocator.free(decompressed);
+
+	try std.testing.expectEqualSlices(u8, data, decompressed);
 }
