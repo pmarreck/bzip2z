@@ -1091,6 +1091,13 @@ pub fn buildSuffixArraySAIS(allocator: Allocator, text: []const u8) ![]u32 {
 	const sa = try allocator.alloc(i32, n);
 	errdefer allocator.free(sa);
 
+	// Helper to get character at position (byte+1 for real chars, 0 = sentinel)
+	const getChar = struct {
+		fn get(pos: usize, txt: []const u8) usize {
+			return if (pos < txt.len) @as(usize, txt[pos]) + 1 else 0;
+		}
+	}.get;
+
 	// Classify types: false = S-type (0), true = L-type (1)
 	// Last position (sentinel) is S-type by default
 	const types = try allocator.alloc(bool, n);
@@ -1100,8 +1107,9 @@ pub fn buildSuffixArraySAIS(allocator: Allocator, text: []const u8) ![]u32 {
 	if (n >= 2) {
 		var i: usize = n - 2;
 		while (true) {
-			const c_i = if (i < text.len) text[i] else 0;
-			const c_next = if (i + 1 < text.len) text[i + 1] else 0;
+			// Use getChar (+1 mapping) for consistency with bucket sort
+			const c_i = getChar(i, text);
+			const c_next = getChar(i + 1, text);
 			if (c_i < c_next) {
 				types[i] = false; // S-type
 			} else if (c_i > c_next) {
@@ -1137,13 +1145,6 @@ pub fn buildSuffixArraySAIS(allocator: Allocator, text: []const u8) ![]u32 {
 		sum += bucket_sizes[c];
 		bucket_ends[c] = sum;
 	}
-
-	// Helper to get character at position (0 = sentinel)
-	const getChar = struct {
-		fn get(pos: usize, txt: []const u8) usize {
-			return if (pos < txt.len) @as(usize, txt[pos]) + 1 else 0;
-		}
-	}.get;
 
 	// Initialize SA
 	@memset(sa, 0);
@@ -1330,8 +1331,9 @@ fn lmsEqual(text: []const u8, types: []const bool, pos1: usize, pos2: usize, isL
 
 		if (p1 >= n or p2 >= n) return false;
 
-		const c1 = if (p1 < text.len) text[p1] else 0;
-		const c2 = if (p2 < text.len) text[p2] else 0;
+		// Use +1 mapping for consistency with bucket sort (byte+1 for real chars, 0 for sentinel)
+		const c1: u16 = if (p1 < text.len) @as(u16, text[p1]) + 1 else 0;
+		const c2: u16 = if (p2 < text.len) @as(u16, text[p2]) + 1 else 0;
 
 		if (c1 != c2) return false;
 		if (types[p1] != types[p2]) return false;
@@ -1493,40 +1495,12 @@ fn saisRecurse(allocator: Allocator, text: []i32, alphabet_size: u32, sa_out: []
 	// Step 4: Compact LMS suffixes and compute names
 	var lms_count: usize = 0;
 	for (0..n) |idx| {
-		// If position is non-zero (or 0 is LMS), check if LMS
-		// Careful with 0: sa value 0 is valid.
-		// We need to check if slot is occupied by LMS?
-		// Step 3 output contains ALL suffixes sorted.
-		// We select only LMS ones.
 		const pos = sa_out[idx];
-		if (isLMS(@intCast(pos), types) or (pos == @as(i32, @intCast(n - 1)) and types[n - 1] == false)) {
-			// n-1 is sentinel (S), usually LMS unless n-2 is also S.
-			// Wait, standard check:
-			if (pos == 0) {
-				// 0 is LMS only if sentinel? No, 0 is never LMS by definition (pos>0)
-				// Unless we handle 0 specially?
-				// In recursion, 0 is valid position.
-				// isLMS(0) is false.
-			} else {
-				if (isLMS(@intCast(pos), types)) {
-					sa_out[lms_count] = pos;
-					lms_count += 1;
-				}
-				// Special check for sentinel at n-1 if it didn't trigger isLMS?
-				// Sentinel logic should match main.
-				// Main checks sa[idx] != 0.
-				// Here 0 is a valid position.
-				// But sa was init to 0? Step 3 fills SA fully.
-			}
+		if (pos > 0 and isLMS(@intCast(pos), types)) {
+			sa_out[lms_count] = pos;
+			lms_count += 1;
 		}
 	}
-	// Also include sentinel if not found?
-	// In recursion, sentinel is just another character.
-	// If n-1 is S and n-2 is L, n-1 is LMS.
-	// If n-1 is S and n-2 is S, n-1 is Not LMS.
-	// But sentinel MUST be included in LMS list for recursion to work?
-	// Normally yes.
-	// If names are not unique, we recurse.
 
 	// Initialize names area
 	const names_start = n / 2;
@@ -4341,5 +4315,34 @@ test "large multi-block compress round-trip with progress callback" {
 	const decompressed = try decompress(allocator, compressed);
 	defer allocator.free(decompressed);
 
+	try std.testing.expectEqualSlices(u8, data, decompressed);
+}
+
+test "compress round-trip with null bytes in data" {
+	// Regression test: SA-IS character mapping must be consistent between
+	// type classification (getChar with byte+1) and bucket sort. Data containing
+	// 0x00 bytes previously caused sentinel confusion in the suffix array
+	// construction, producing incorrect BWT output.
+	const allocator = std.testing.allocator;
+
+	// Create data with plenty of null bytes mixed with other patterns
+	const size = 900_200; // Just over one block to exercise multi-block + SA-IS
+	const data = try allocator.alloc(u8, size);
+	defer allocator.free(data);
+
+	// Pattern with frequent null bytes — simulates binary file formats
+	for (data, 0..) |*byte, i| {
+		byte.* = @truncate((i *% 5) ^ (i >> 8));
+		// Inject null bytes at regular intervals and clusters
+		if (i % 37 == 0 or i % 128 < 4) byte.* = 0;
+	}
+
+	const compressed = try compress(allocator, data);
+	defer allocator.free(compressed);
+
+	const decompressed = try decompress(allocator, compressed);
+	defer allocator.free(decompressed);
+
+	try std.testing.expectEqual(data.len, decompressed.len);
 	try std.testing.expectEqualSlices(u8, data, decompressed);
 }
