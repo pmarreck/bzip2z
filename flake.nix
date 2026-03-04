@@ -3,22 +3,46 @@
 
 	inputs = {
 		nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-		progrez = {
-			url = "github:pmarreck/progrez/yolo";
-			flake = false;
-		};
 	};
 
-	outputs = { self, nixpkgs, progrez }:
+	outputs = { self, nixpkgs }:
 		let
+			pname = "bzip2z";
+			version = "0.1.0";
 			devSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 			ciHostSystems = [ "x86_64-linux" ];
+			allBuildSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
 
+			zigDepsHash = "sha256-+IL2kbFzS94RtafZEei+azVo32dFAr6IFr0Pky6qURc=";
+
+			mkZigDeps = pkgs: pkgs.stdenv.mkDerivation {
+				pname = "${pname}-zig-deps";
+				inherit version;
+				src = self;
+				nativeBuildInputs = with pkgs; [ zig git cacert ];
+				outputHashMode = "recursive";
+				outputHashAlgo = "sha256";
+				outputHash = zigDepsHash;
+				buildPhase = ''
+					export HOME=$TMPDIR
+					export ZIG_GLOBAL_CACHE_DIR=$out
+					export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+					export GIT_SSL_CAINFO=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+					zig build --fetch=all
+				'';
+				dontInstall = true;
+				dontFixup = true;
+			};
+
 			mkCiPackage = pkgs: name: zigTarget: runTests:
+				let
+					isDarwin = pkgs.stdenv.isDarwin;
+					zigDeps = mkZigDeps pkgs;
+				in
 				pkgs.stdenv.mkDerivation {
-					pname = "bzip2z-${name}";
-					version = "0.1.0";
+					pname = "${pname}-${name}";
+					inherit version;
 					src = self;
 					strictDeps = true;
 					dontConfigure = true;
@@ -28,30 +52,25 @@
 						pkgs.zig
 						pkgs.bzip2
 						pkgs.pbzip2
+					] ++ pkgs.lib.optionals isDarwin [
+						pkgs.darwin.cctools
+						pkgs.apple-sdk
 					];
 
-					buildPhase = let
-						zigPkgHash = "progrez-0.1.0-0YJXrl0CAgCI-gvYCSEWEnW2rsWMTPbehyOnOveB4EJp";
-					in ''
+					buildPhase = ''
 						runHook preBuild
 						export HOME="$TMPDIR/home"
 						mkdir -p "$HOME"
-						export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
-						mkdir -p "$TMPDIR/zig-system-pkg/${zigPkgHash}"
-						cp -r ${progrez}/* "$TMPDIR/zig-system-pkg/${zigPkgHash}/"
+						export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+						mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+						cp -r ${zigDeps}/* "$ZIG_GLOBAL_CACHE_DIR/"
+						chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"
 						${if runTests then ''
-						zig build test --system "$TMPDIR/zig-system-pkg"
+						zig build test
 						patchShebangs build tests/cli_test
-						# Override build script to pass --system so cli_test doesn't hit network
-						cat > build <<BUILDEOF
-#!/usr/bin/env bash
-exec zig build --system "$TMPDIR/zig-system-pkg" "\$@"
-BUILDEOF
-						chmod +x build
-						patchShebangs build
 						bash tests/cli_test
 						'' else ":"}
-						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget} --system "$TMPDIR/zig-system-pkg"
+						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
 						runHook postBuild
 					'';
 
@@ -82,6 +101,11 @@ BUILDEOF
 						echo "bzip2z dev shell: zig/zls/bzip2"
 					'';
 				};
+			});
+
+			# Expose zigDeps for hash discovery on any build system
+			legacyPackages = forSystems allBuildSystems (system: pkgs: {
+				zigDeps = mkZigDeps pkgs;
 			});
 
 			packages = forSystems ciHostSystems (system: pkgs:
