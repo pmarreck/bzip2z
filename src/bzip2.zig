@@ -298,10 +298,33 @@ pub fn BitReader(comptime ReaderType: type) type {
 		pub fn readBit(self: *Self) Error!u1 {
 			return @truncate(try self.readBits(1));
 		}
+
+		/// Peek at next n bits without consuming them (n must be <= 32)
+		pub fn peekBits(self: *Self, n: u6) Error!u32 {
+			while (self.bits_in_buffer < n) {
+				const byte = readByteAny(self.reader) catch |err| {
+					if (err == error.EndOfStream) return Error.UnexpectedEof;
+					return Error.CorruptData;
+				};
+				self.buffer = (self.buffer << 8) | byte;
+				self.bits_in_buffer += 8;
+			}
+			const shift: u6 = self.bits_in_buffer - n;
+			const mask: u64 = (@as(u64, 1) << n) - 1;
+			return @truncate((self.buffer >> shift) & mask);
+		}
+
+		/// Skip n bits (must have been previously peeked/ensured in buffer)
+		pub fn skipBits(self: *Self, n: u6) void {
+			self.bits_in_buffer -= n;
+		}
 	};
 }
 
 // ============ Huffman Table ============
+
+const HUFF_FAST_BITS = 10;
+const HUFF_FAST_SIZE = 1 << HUFF_FAST_BITS;
 
 const HuffmanTable = struct {
 	// Limits for each code length
@@ -310,12 +333,17 @@ const HuffmanTable = struct {
 	bases: [MAX_CODE_LEN + 2]u32,
 	// Permutation table
 	perms: [MAX_ALPHA_SIZE]u16,
+	// Fast lookup table: decode codes up to HUFF_FAST_BITS in O(1)
+	fast_symbols: [HUFF_FAST_SIZE]u16,
+	fast_lengths: [HUFF_FAST_SIZE]u8,
 
 	pub fn init() HuffmanTable {
 		return .{
 			.limits = [_]u32{0} ** (MAX_CODE_LEN + 2),
 			.bases = [_]u32{0} ** (MAX_CODE_LEN + 2),
 			.perms = [_]u16{0} ** MAX_ALPHA_SIZE,
+			.fast_symbols = [_]u16{0} ** HUFF_FAST_SIZE,
+			.fast_lengths = [_]u8{0} ** HUFF_FAST_SIZE,
 		};
 	}
 
@@ -358,12 +386,50 @@ const HuffmanTable = struct {
 				}
 			}
 		}
+
+		// Build fast lookup table for codes up to HUFF_FAST_BITS
+		@memset(&self.fast_lengths, 0);
+		var perm_base: usize = 0;
+		for (1..@min(HUFF_FAST_BITS + 1, max_len + 1)) |len| {
+			const base_code = self.bases[len];
+			const num_codes = self.limits[len] - base_code;
+			const pad_bits = HUFF_FAST_BITS - len;
+
+			for (0..num_codes) |c| {
+				const canonical_code = base_code + @as(u32, @intCast(c));
+				const sym = self.perms[perm_base + c];
+				// Fill all entries with this code prefix
+				const entry_base = canonical_code << @intCast(pad_bits);
+				const num_entries = @as(u32, 1) << @intCast(pad_bits);
+				for (0..num_entries) |suffix| {
+					const entry = entry_base + @as(u32, @intCast(suffix));
+					if (entry < HUFF_FAST_SIZE) {
+						self.fast_symbols[entry] = sym;
+						self.fast_lengths[entry] = @intCast(len);
+					}
+				}
+			}
+			perm_base += num_codes;
+		}
 	}
 
 	/// Decode one symbol from bit reader
 	pub fn decode(self: *const HuffmanTable, comptime ReaderType: type, bits: *BitReader(ReaderType)) Error!u16 {
+		// Fast path: peek HUFF_FAST_BITS and lookup table
+		if (bits.peekBits(HUFF_FAST_BITS)) |peek| {
+			const fast_len = self.fast_lengths[peek];
+			if (fast_len > 0) {
+				bits.skipBits(@intCast(fast_len));
+				return self.fast_symbols[peek];
+			}
+			// Code is longer than HUFF_FAST_BITS, fall through to slow path
+		} else |_| {
+			// Not enough bits for fast path (near end of stream), fall through
+		}
+
+		// Slow path: bit-by-bit decode
 		var code: u32 = 0;
-		var perm_offset: usize = 0; // Cumulative count of symbols with shorter codes
+		var perm_offset: usize = 0;
 
 		for (1..MAX_CODE_LEN + 1) |len| {
 			code = (code << 1) | try bits.readBit();
@@ -371,7 +437,6 @@ const HuffmanTable = struct {
 				const idx = code - self.bases[len];
 				return self.perms[perm_offset + idx];
 			}
-			// Add number of symbols at this length to offset for next length
 			perm_offset += self.limits[len] - self.bases[len];
 		}
 		return Error.HuffmanOverflow;
@@ -761,11 +826,8 @@ pub const Decompressor = struct {
 					if (idx >= self.num_in_use) return Error.CorruptData;
 
 					const out_byte = mtf[idx];
-					// MTF update - move to front
-					var k = idx;
-					while (k > 0) : (k -= 1) {
-						mtf[k] = mtf[k - 1];
-					}
+					// MTF update - shift elements right, move value to front
+					std.mem.copyBackwards(u8, mtf[1..@as(usize, idx) + 1], mtf[0..idx]);
 					mtf[0] = out_byte;
 
 					if (self.block_size >= MAX_BLOCK_SIZE) {
@@ -781,11 +843,8 @@ pub const Decompressor = struct {
 				if (idx >= self.num_in_use) return Error.CorruptData;
 
 				const out_byte = mtf[idx];
-				// MTF update - move to front
-				var k = idx;
-				while (k > 0) : (k -= 1) {
-					mtf[k] = mtf[k - 1];
-				}
+				// MTF update - shift elements right, move value to front
+				std.mem.copyBackwards(u8, mtf[1..@as(usize, idx) + 1], mtf[0..idx]);
 				mtf[0] = out_byte;
 
 				if (self.block_size >= MAX_BLOCK_SIZE) {
@@ -913,14 +972,10 @@ pub const Decompressor = struct {
 	}
 
 	fn buildInverseBwt(self: *Decompressor) Error!void {
-		// In BWT, the last column L and first column F are related.
-		// F is the sorted version of L.
-		// The transformation table T maps each position i in L to the
-		// position j in F where the same character instance appears.
-		//
-		// For character c at position i in L, T[i] is the position in F
-		// where this specific instance of c appears. Since F is sorted,
-		// T[i] = cumulative_count[c] + (number of c's before position i in L)
+		// Merged TT table: pack both the next position and the character byte
+		// into a single u32 entry: tt[i] = (byte << 24) | next_position
+		// This halves cache misses during inverse BWT (one read instead of two).
+		// Position fits in 24 bits (max block size = 900,000 < 16,777,216).
 
 		// First pass: count occurrences of each byte
 		var counts: [256]u32 = [_]u32{0} ** 256;
@@ -936,13 +991,12 @@ pub const Decompressor = struct {
 			sum += counts[i];
 		}
 
-		// Second pass: build TT table
-		// For each position i, TT[i] = cumulative[block[i]] + rank
-		// where rank is how many times block[i] has appeared before position i
+		// Second pass: build merged TT table
 		@memset(&counts, 0);
 		for (0..self.block_size) |i| {
 			const byte = self.block[i];
-			self.tt[i] = cumulative[byte] + counts[byte];
+			const next_pos = cumulative[byte] + counts[byte];
+			self.tt[i] = (@as(u32, byte) << 24) | next_pos;
 			counts[byte] += 1;
 		}
 	}
@@ -952,18 +1006,20 @@ pub const Decompressor = struct {
 			return Error.InvalidBwtIndex;
 		}
 
-		// The inverse BWT follows the transformation chain.
-		// Following T gives us characters in reverse order (last to first),
-		// so we fill the output array from the end to the start.
+		// Inverse BWT using merged TT table: each entry contains both
+		// the character byte (top 8 bits) and the next position (bottom 24 bits).
+		// One random read per iteration instead of two.
 		self.output_len = self.block_size;
 		var pos: u32 = self.bwt_primary_index;
 
 		var i: usize = self.block_size;
 		while (i > 0) {
 			i -= 1;
-			// Output the character at current position, then follow T
-			self.output[i] = self.block[pos];
-			pos = self.tt[pos];
+			const entry = self.tt[pos];
+			self.output[i] = @truncate(entry >> 24);
+			pos = entry & 0x00FFFFFF;
+			// Prefetch next iteration's merged TT entry
+			@prefetch(@as([*]const u8, @ptrCast(&self.tt[pos])), .{});
 		}
 
 		// Handle randomization (if used)
@@ -2258,22 +2314,26 @@ fn prepareBlock(allocator: Allocator, input: []const u8) !BlockPrepared {
 	defer allocator.free(mtf_data);
 
 	var mtf_list: [256]u8 = undefined;
+	var mtf_reverse: [256]u8 = undefined; // Reverse lookup: mtf_reverse[sym] = position of sym in mtf_list
 	for (0..num_in_use) |i| {
 		mtf_list[i] = @intCast(i);
+		mtf_reverse[i] = @intCast(i); // Identity mapping initially
 	}
 
 	for (bwt_result.data, 0..) |byte, i| {
 		const seq = unseq_to_seq[byte];
-		var pos: usize = 0;
-		while (mtf_list[pos] != seq) : (pos += 1) {}
+		const pos: usize = mtf_reverse[seq]; // O(1) lookup instead of linear scan
 		mtf_data[i] = @intCast(pos);
 		if (pos > 0) {
 			const val = mtf_list[pos];
+			// Update reverse lookup for shifted elements
 			var j = pos;
 			while (j > 0) : (j -= 1) {
 				mtf_list[j] = mtf_list[j - 1];
+				mtf_reverse[mtf_list[j]] = @intCast(j);
 			}
 			mtf_list[0] = val;
+			mtf_reverse[val] = 0;
 		}
 	}
 
@@ -2402,12 +2462,7 @@ fn writeBlock(bits: anytype, block: *const BlockPrepared) !void {
 	for (block.symbols) |sym| {
 		const code = block.codes[sym];
 		const len = block.lengths[sym];
-		var i: u8 = len;
-		while (i > 0) {
-			i -= 1;
-			const bit: u1 = @truncate(code >> @as(u5, @intCast(i)));
-			try bits.writeBit(bit);
-		}
+		try bits.writeBits(code, @intCast(len));
 	}
 }
 
