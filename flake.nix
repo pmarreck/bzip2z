@@ -14,7 +14,7 @@
 			allBuildSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
 
-			zigDepsHash = "sha256-+IL2kbFzS94RtafZEei+azVo32dFAr6IFr0Pky6qURc=";
+			zigDepsHash = "sha256-pORP+du2u2gdE5A72LrICr0jD63tlHGSn92Z6e55RKo=";
 
 			mkZigDeps = pkgs: pkgs.stdenv.mkDerivation {
 				pname = "${pname}-zig-deps";
