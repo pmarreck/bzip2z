@@ -108,11 +108,22 @@
 				zigDeps = mkZigDeps pkgs;
 			});
 
-			packages = forSystems ciHostSystems (system: pkgs:
+			packages = forSystems allBuildSystems (system: pkgs:
 				let
 					mk = name: target: runTests: mkCiPackage pkgs name target runTests;
+					nativeTarget = {
+						"x86_64-linux" = "x86_64-linux-gnu";
+						"aarch64-linux" = "aarch64-linux-gnu";
+						"aarch64-darwin" = "aarch64-macos";
+					}.${system};
+					nativeName = {
+						"x86_64-linux" = "linux-x86_64";
+						"aarch64-linux" = "linux-aarch64";
+						"aarch64-darwin" = "macos-aarch64";
+					}.${system};
 				in {
-					default = mk "linux-x86_64" "x86_64-linux-gnu" false;
+					default = mk nativeName nativeTarget false;
+				} // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
 					ci-tests = mk "linux-x86_64-tests" "x86_64-linux-gnu" true;
 					ci-linux-x86_64 = mk "linux-x86_64" "x86_64-linux-gnu" false;
 					ci-linux-aarch64 = mk "linux-aarch64" "aarch64-linux-gnu" false;
