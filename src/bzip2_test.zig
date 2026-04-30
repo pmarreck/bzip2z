@@ -799,3 +799,55 @@ test "interop pbzip2 multistream - zig compress, pbzip2 decompress" {
 	std.fs.cwd().deleteFile(tmp_path) catch {};
 	std.fs.cwd().deleteFile(bz2_path) catch {};
 }
+
+test "regression: dolphin level-9 bz2 reproducer block2 (validate inbox 2026-04-30)" {
+	const allocator = testing.allocator;
+	try requireSystemBzip2(allocator);
+
+	const repro_path = "tests/fixtures/repro_block2_dolphin.bz2";
+	const f = std.fs.cwd().openFile(repro_path, .{}) catch return error.SkipZigTest;
+	defer f.close();
+	const sz = try f.getEndPos();
+	const compressed = try allocator.alloc(u8, sz);
+	defer allocator.free(compressed);
+	_ = try f.readAll(compressed);
+
+	const decompressed = try bzip2.decompress(allocator, compressed);
+	defer allocator.free(decompressed);
+
+	const r = try std.process.Child.run(.{
+		.allocator = allocator,
+		.max_output_bytes = 16 * 1024 * 1024,
+		.argv = &[_][]const u8{ "bunzip2", "-c", repro_path },
+	});
+	defer allocator.free(r.stdout);
+	defer allocator.free(r.stderr);
+
+	try testing.expectEqualSlices(u8, r.stdout, decompressed);
+}
+
+test "regression: dolphin level-9 bz2 reproducer block10 (validate inbox 2026-04-30)" {
+	const allocator = testing.allocator;
+	try requireSystemBzip2(allocator);
+
+	const repro_path = "tests/fixtures/repro_block10_dolphin.bz2";
+	const f = std.fs.cwd().openFile(repro_path, .{}) catch return error.SkipZigTest;
+	defer f.close();
+	const sz = try f.getEndPos();
+	const compressed = try allocator.alloc(u8, sz);
+	defer allocator.free(compressed);
+	_ = try f.readAll(compressed);
+
+	const decompressed = try bzip2.decompress(allocator, compressed);
+	defer allocator.free(decompressed);
+
+	const r = try std.process.Child.run(.{
+		.allocator = allocator,
+		.max_output_bytes = 16 * 1024 * 1024,
+		.argv = &[_][]const u8{ "bunzip2", "-c", repro_path },
+	});
+	defer allocator.free(r.stdout);
+	defer allocator.free(r.stderr);
+
+	try testing.expectEqualSlices(u8, r.stdout, decompressed);
+}
