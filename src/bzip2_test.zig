@@ -56,29 +56,53 @@ const MaxAllocAllocator = struct {
 	};
 };
 
+fn testIo() std.Io {
+	return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// Write all bytes to a file. Replaces the pre-0.16 `fileWriteAll(file, data)` call.
+fn fileWriteAll(file: std.Io.File, data: []const u8) !void {
+	var buf: [4096]u8 = undefined;
+	var w = file.writer(testIo(), &buf);
+	try w.interface.writeAll(data);
+	try w.interface.flush();
+}
+
+/// Read all bytes from a file. Replaces the pre-0.16 `fileReadAll(allocator, file, max)`.
+fn fileReadAll(allocator: std.mem.Allocator, file: std.Io.File, max: usize) ![]u8 {
+	var buf: [4096]u8 = undefined;
+	var r = file.reader(testIo(), &buf);
+	return try r.interface.readAlloc(allocator, max);
+}
+
+/// Lightweight $TMPDIR lookup via libc, returning an allocator-owned copy or null.
+fn getEnvOwned(allocator: std.mem.Allocator, key: [*:0]const u8) ?[]u8 {
+	const c_val = std.c.getenv(key) orelse return null;
+	const slice = std.mem.span(c_val);
+	return allocator.dupe(u8, slice) catch null;
+}
+
 fn tmpPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-	const tmpdir_owned = std.process.getEnvVarOwned(allocator, "TMPDIR") catch null;
-	const tmpdir = if (tmpdir_owned) |value| value else "/tmp";
+	const tmpdir_owned = getEnvOwned(allocator, "TMPDIR");
 	defer if (tmpdir_owned) |value| allocator.free(value);
+	const tmpdir = if (tmpdir_owned) |value| value else "/tmp";
 
 	const id = tmp_counter.fetchAdd(1, .seq_cst);
 	return try std.fmt.allocPrint(allocator, "{s}/{s}-{d}", .{ tmpdir, name, id });
 }
 
+fn runChild(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.RunResult {
+	return std.process.run(allocator, testIo(), .{ .argv = argv });
+}
+
 fn requireSystemBzip2(allocator: std.mem.Allocator) !void {
-	const result = std.process.Child.run(.{
-		.allocator = allocator,
-		.argv = &[_][]const u8{ "bzip2", "--help" },
-	}) catch return error.SkipZigTest;
+	const result = runChild(allocator, &[_][]const u8{ "bzip2", "--help" }) catch return error.SkipZigTest;
 	defer allocator.free(result.stdout);
 	defer allocator.free(result.stderr);
 }
 
 fn requirePbzip2(allocator: std.mem.Allocator) !void {
-	const result = std.process.Child.run(.{
-		.allocator = allocator,
-		.argv = &[_][]const u8{ "pbzip2", "-h" },
-	}) catch return error.SkipZigTest;
+	const result = runChild(allocator, &[_][]const u8{ "pbzip2", "-h" }) catch return error.SkipZigTest;
 	defer allocator.free(result.stdout);
 	defer allocator.free(result.stderr);
 }
@@ -139,11 +163,13 @@ test "detect invalid bzip2 header" {
 	var decompressor = try bzip2.Decompressor.init(allocator);
 	defer decompressor.deinit();
 
-	var input = std.io.fixedBufferStream(&invalid_data);
+	var input: std.Io.Reader = .fixed(&invalid_data);
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const result = decompressor.decompress(input.reader(), output.writer(allocator));
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const result = decompressor.decompress(&input, &aw.writer);
 	try testing.expectError(bzip2.Error.InvalidMagic, result);
 }
 
@@ -156,11 +182,13 @@ test "detect invalid block size" {
 	var decompressor = try bzip2.Decompressor.init(allocator);
 	defer decompressor.deinit();
 
-	var input = std.io.fixedBufferStream(&invalid_data);
+	var input: std.Io.Reader = .fixed(&invalid_data);
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const result = decompressor.decompress(input.reader(), output.writer(allocator));
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const result = decompressor.decompress(&input, &aw.writer);
 	try testing.expectError(bzip2.Error.InvalidBlockSize, result);
 }
 
@@ -186,14 +214,13 @@ test "decompress real bzip2 file from tmp" {
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(test_content);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, test_content);
 	}
 
 	// Compress with system bzip2 using run()
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		std.debug.print("Failed to run bzip2: {}\n", .{err});
@@ -203,19 +230,19 @@ test "decompress real bzip2 file from tmp" {
 	defer allocator.free(compress_result.stderr);
 
 	// Verify bz2 file was created
-	const bz2_file = std.fs.cwd().openFile(bz2_path, .{}) catch |err| {
+	const bz2_file = std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{}) catch |err| {
 		std.debug.print("bz2 file not created: {}\n", .{err});
 		return err;
 	};
-	defer bz2_file.close();
+	defer bz2_file.close(testIo());
 
-	const bz2_size = try bz2_file.getEndPos();
+	const bz2_size = (try bz2_file.stat(testIo())).size;
 	try testing.expect(bz2_size > 0);
 	try testing.expect(bz2_size < test_content.len); // Should be compressed
 
 	// Clean up
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "round-trip with system bzip2 via files" {
@@ -231,33 +258,32 @@ test "round-trip with system bzip2 via files" {
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(test_data);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, test_data);
 	}
 
 	// Compress with system bzip2
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		std.debug.print("bzip2 compress failed: {}\n", .{err});
-		std.fs.cwd().deleteFile(tmp_path) catch {};
+		std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
 		return err;
 	};
 	defer allocator.free(compress_result.stdout);
 	defer allocator.free(compress_result.stderr);
 
 	// Verify bz2 file exists and read it
-	const bz2_file = std.fs.cwd().openFile(bz2_path, .{}) catch |err| {
+	const bz2_file = std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{}) catch |err| {
 		std.debug.print("bz2 file not found: {}\n", .{err});
-		std.fs.cwd().deleteFile(tmp_path) catch {};
+		std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
 		return err;
 	};
-	defer bz2_file.close();
+	defer bz2_file.close(testIo());
 
 	// Read compressed data
-	const compressed = try bz2_file.readToEndAlloc(allocator, 1024 * 1024);
+	const compressed = try fileReadAll(allocator, bz2_file, 1024 * 1024);
 	defer allocator.free(compressed);
 
 	// Verify it's valid bzip2 (starts with "BZh")
@@ -265,8 +291,8 @@ test "round-trip with system bzip2 via files" {
 	try testing.expectEqualSlices(u8, "BZh", compressed[0..3]);
 
 	// Clean up
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "decompress system bzip2 output - simple text" {
@@ -282,15 +308,14 @@ test "decompress system bzip2 output - simple text" {
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(test_data);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, test_data);
 	}
-	defer std.fs.cwd().deleteFile(tmp_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
 
 	// Compress with system bzip2
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		std.debug.print("bzip2 compress failed: {}\n", .{err});
@@ -298,13 +323,13 @@ test "decompress system bzip2 output - simple text" {
 	};
 	defer allocator.free(compress_result.stdout);
 	defer allocator.free(compress_result.stderr);
-	defer std.fs.cwd().deleteFile(bz2_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 
 	// Read compressed data
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	defer bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{});
+	defer bz2_file.close(testIo());
 
-	const compressed = try bz2_file.readToEndAlloc(allocator, 1024 * 1024);
+	const compressed = try fileReadAll(allocator, bz2_file, 1024 * 1024);
 	defer allocator.free(compressed);
 
 	// Decompress with our implementation
@@ -349,15 +374,14 @@ test "decompress system bzip2 output - multiple patterns" {
 		defer allocator.free(bz2_path);
 
 		{
-			const file = try std.fs.cwd().createFile(tmp_path, .{});
-			defer file.close();
-			try file.writeAll(test_data);
+			const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+			defer file.close(testIo());
+			try fileWriteAll(file, test_data);
 		}
-		defer std.fs.cwd().deleteFile(tmp_path) catch {};
+		defer std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
 
 		// Compress with system bzip2
-		const compress_result = std.process.Child.run(.{
-			.allocator = allocator,
+		const compress_result = std.process.run(allocator, testIo(), .{
 			.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 		}) catch |err| {
 			std.debug.print("bzip2 compress failed for test case: {s}\n", .{test_data});
@@ -365,13 +389,13 @@ test "decompress system bzip2 output - multiple patterns" {
 		};
 		defer allocator.free(compress_result.stdout);
 		defer allocator.free(compress_result.stderr);
-		defer std.fs.cwd().deleteFile(bz2_path) catch {};
+		defer std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 
 		// Read compressed data
-		const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-		defer bz2_file.close();
+		const bz2_file = try std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{});
+		defer bz2_file.close(testIo());
 
-		const compressed = try bz2_file.readToEndAlloc(allocator, 1024 * 1024);
+		const compressed = try fileReadAll(allocator, bz2_file, 1024 * 1024);
 		defer allocator.free(compressed);
 
 		// Decompress with our implementation
@@ -403,15 +427,14 @@ test "decompress system bzip2 output - binary data" {
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(&binary_data);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, &binary_data);
 	}
-	defer std.fs.cwd().deleteFile(tmp_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
 
 	// Compress with system bzip2
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		std.debug.print("bzip2 compress failed: {}\n", .{err});
@@ -419,13 +442,13 @@ test "decompress system bzip2 output - binary data" {
 	};
 	defer allocator.free(compress_result.stdout);
 	defer allocator.free(compress_result.stderr);
-	defer std.fs.cwd().deleteFile(bz2_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 
 	// Read compressed data
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	defer bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{});
+	defer bz2_file.close(testIo());
 
-	const compressed = try bz2_file.readToEndAlloc(allocator, 1024 * 1024);
+	const compressed = try fileReadAll(allocator, bz2_file, 1024 * 1024);
 	defer allocator.free(compressed);
 
 	// Decompress with our implementation
@@ -457,13 +480,12 @@ test "interop multi-block - system compress, zig decompress" {
 	}
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(data);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, data);
 	}
 
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		std.debug.print("system bzip2 compress failed: {}\n", .{err});
@@ -472,10 +494,10 @@ test "interop multi-block - system compress, zig decompress" {
 	defer allocator.free(compress_result.stdout);
 	defer allocator.free(compress_result.stderr);
 
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	defer bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{});
+	defer bz2_file.close(testIo());
 
-	const compressed = try bz2_file.readToEndAlloc(allocator, size);
+	const compressed = try fileReadAll(allocator, bz2_file, size);
 	defer allocator.free(compressed);
 
 	const decompressed = try bzip2.decompress(allocator, compressed);
@@ -483,8 +505,8 @@ test "interop multi-block - system compress, zig decompress" {
 
 	try testing.expectEqualSlices(u8, data, decompressed);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "interop multi-block - zig compress, system decompress" {
@@ -508,13 +530,12 @@ test "interop multi-block - zig compress, system decompress" {
 	defer allocator.free(compressed);
 
 	{
-		const file = try std.fs.cwd().createFile(bz2_path, .{});
-		defer file.close();
-		try file.writeAll(compressed);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), bz2_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, compressed);
 	}
 
-	const decompress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const decompress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-d", "-k", "-f", bz2_path },
 	}) catch |err| {
 		std.debug.print("system bzip2 decompress failed: {}\n", .{err});
@@ -523,16 +544,16 @@ test "interop multi-block - zig compress, system decompress" {
 	defer allocator.free(decompress_result.stdout);
 	defer allocator.free(decompress_result.stderr);
 
-	const plain_file = try std.fs.cwd().openFile(tmp_path, .{});
-	defer plain_file.close();
+	const plain_file = try std.Io.Dir.cwd().openFile(testIo(), tmp_path, .{});
+	defer plain_file.close(testIo());
 
-	const roundtrip = try plain_file.readToEndAlloc(allocator, size);
+	const roundtrip = try fileReadAll(allocator, plain_file, size);
 	defer allocator.free(roundtrip);
 
 	try testing.expectEqualSlices(u8, data, roundtrip);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "interop multi-stream - zig compress multi-stream, system decompress" {
@@ -569,13 +590,12 @@ test "interop multi-stream - zig compress multi-stream, system decompress" {
 	try testing.expect(stream_count >= 2);
 
 	{
-		const file = try std.fs.cwd().createFile(bz2_path, .{});
-		defer file.close();
-		try file.writeAll(compressed);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), bz2_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, compressed);
 	}
 
-	const decompress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const decompress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-d", "-k", "-f", bz2_path },
 	}) catch |err| {
 		std.debug.print("system bzip2 decompress failed: {}\n", .{err});
@@ -584,16 +604,16 @@ test "interop multi-stream - zig compress multi-stream, system decompress" {
 	defer allocator.free(decompress_result.stdout);
 	defer allocator.free(decompress_result.stderr);
 
-	const plain_file = try std.fs.cwd().openFile(tmp_path, .{});
-	defer plain_file.close();
+	const plain_file = try std.Io.Dir.cwd().openFile(testIo(), tmp_path, .{});
+	defer plain_file.close(testIo());
 
-	const roundtrip = try plain_file.readToEndAlloc(allocator, size);
+	const roundtrip = try fileReadAll(allocator, plain_file, size);
 	defer allocator.free(roundtrip);
 
 	try testing.expectEqualSlices(u8, data, roundtrip);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "parallel decompress - zig multi-stream" {
@@ -651,19 +671,19 @@ test "parallel file decode streams without large allocs" {
 	defer allocator.free(compressed);
 
 	{
-		const file = try std.fs.cwd().createFile(bz2_path, .{});
-		defer file.close();
-		try file.writeAll(compressed);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), bz2_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, compressed);
 	}
 
 	var limited = MaxAllocAllocator.init(allocator, 5_000_000);
 	const limited_alloc = limited.allocator();
 
 	{
-		const file = try std.fs.cwd().createFile(out_path, .{});
-		defer file.close();
+		const file = try std.Io.Dir.cwd().createFile(testIo(), out_path, .{});
+		defer file.close(testIo());
 		var out_buf: [64 * 1024]u8 = undefined;
-		var out_writer = file.writer(&out_buf);
+		var out_writer = file.writer(testIo(), &out_buf);
 		const out_stream = &out_writer.interface;
 		try bzip2.decompressFileToWriterWithOptions(limited_alloc, bz2_path, out_stream, .{
 			.threads = 2,
@@ -672,16 +692,16 @@ test "parallel file decode streams without large allocs" {
 		try out_stream.flush();
 	}
 
-	const out_file = try std.fs.cwd().openFile(out_path, .{});
-	defer out_file.close();
-	const roundtrip = try out_file.readToEndAlloc(allocator, size);
+	const out_file = try std.Io.Dir.cwd().openFile(testIo(), out_path, .{});
+	defer out_file.close(testIo());
+	const roundtrip = try fileReadAll(allocator, out_file, size);
 	defer allocator.free(roundtrip);
 
 	try testing.expectEqualSlices(u8, data, roundtrip);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
-	std.fs.cwd().deleteFile(out_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), out_path) catch {};
 }
 
 test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
@@ -701,13 +721,12 @@ test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
 	}
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(data);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), tmp_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, data);
 	}
 
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "pbzip2", "-k", "-f", "-9", "-p2", tmp_path },
 	}) catch |err| {
 		std.debug.print("pbzip2 compress failed: {}\n", .{err});
@@ -716,10 +735,10 @@ test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
 	defer allocator.free(compress_result.stdout);
 	defer allocator.free(compress_result.stderr);
 
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	defer bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(testIo(), bz2_path, .{});
+	defer bz2_file.close(testIo());
 
-	const compressed = try bz2_file.readToEndAlloc(allocator, size * 2);
+	const compressed = try fileReadAll(allocator, bz2_file, size * 2);
 	defer allocator.free(compressed);
 
 	var stream_count: usize = 0;
@@ -736,8 +755,8 @@ test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
 
 	try testing.expectEqualSlices(u8, data, decompressed);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "interop pbzip2 multistream - zig compress, pbzip2 decompress" {
@@ -773,13 +792,12 @@ test "interop pbzip2 multistream - zig compress, pbzip2 decompress" {
 	try testing.expect(stream_count >= 2);
 
 	{
-		const file = try std.fs.cwd().createFile(bz2_path, .{});
-		defer file.close();
-		try file.writeAll(compressed);
+		const file = try std.Io.Dir.cwd().createFile(testIo(), bz2_path, .{});
+		defer file.close(testIo());
+		try fileWriteAll(file, compressed);
 	}
 
-	const decompress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const decompress_result = std.process.run(allocator, testIo(), .{
 		.argv = &[_][]const u8{ "pbzip2", "-d", "-k", "-f", bz2_path },
 	}) catch |err| {
 		std.debug.print("pbzip2 decompress failed: {}\n", .{err});
@@ -788,16 +806,16 @@ test "interop pbzip2 multistream - zig compress, pbzip2 decompress" {
 	defer allocator.free(decompress_result.stdout);
 	defer allocator.free(decompress_result.stderr);
 
-	const plain_file = try std.fs.cwd().openFile(tmp_path, .{});
-	defer plain_file.close();
+	const plain_file = try std.Io.Dir.cwd().openFile(testIo(), tmp_path, .{});
+	defer plain_file.close(testIo());
 
-	const roundtrip = try plain_file.readToEndAlloc(allocator, size);
+	const roundtrip = try fileReadAll(allocator, plain_file, size);
 	defer allocator.free(roundtrip);
 
 	try testing.expectEqualSlices(u8, data, roundtrip);
 
-	std.fs.cwd().deleteFile(tmp_path) catch {};
-	std.fs.cwd().deleteFile(bz2_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), tmp_path) catch {};
+	std.Io.Dir.cwd().deleteFile(testIo(), bz2_path) catch {};
 }
 
 test "regression: dolphin level-9 bz2 reproducer block2 (validate inbox 2026-04-30)" {
@@ -805,19 +823,17 @@ test "regression: dolphin level-9 bz2 reproducer block2 (validate inbox 2026-04-
 	try requireSystemBzip2(allocator);
 
 	const repro_path = "tests/fixtures/repro_block2_dolphin.bz2";
-	const f = std.fs.cwd().openFile(repro_path, .{}) catch return error.SkipZigTest;
-	defer f.close();
-	const sz = try f.getEndPos();
-	const compressed = try allocator.alloc(u8, sz);
+	const f = std.Io.Dir.cwd().openFile(testIo(), repro_path, .{}) catch return error.SkipZigTest;
+	defer f.close(testIo());
+	const sz = (try f.stat(testIo())).size;
+	const compressed = try fileReadAll(allocator, f, @intCast(sz));
 	defer allocator.free(compressed);
-	_ = try f.readAll(compressed);
 
 	const decompressed = try bzip2.decompress(allocator, compressed);
 	defer allocator.free(decompressed);
 
-	const r = try std.process.Child.run(.{
-		.allocator = allocator,
-		.max_output_bytes = 16 * 1024 * 1024,
+	const r = try std.process.run(allocator, testIo(), .{
+		.stdout_limit = .limited(16 * 1024 * 1024),
 		.argv = &[_][]const u8{ "bunzip2", "-c", repro_path },
 	});
 	defer allocator.free(r.stdout);
@@ -831,19 +847,17 @@ test "regression: dolphin level-9 bz2 reproducer block10 (validate inbox 2026-04
 	try requireSystemBzip2(allocator);
 
 	const repro_path = "tests/fixtures/repro_block10_dolphin.bz2";
-	const f = std.fs.cwd().openFile(repro_path, .{}) catch return error.SkipZigTest;
-	defer f.close();
-	const sz = try f.getEndPos();
-	const compressed = try allocator.alloc(u8, sz);
+	const f = std.Io.Dir.cwd().openFile(testIo(), repro_path, .{}) catch return error.SkipZigTest;
+	defer f.close(testIo());
+	const sz = (try f.stat(testIo())).size;
+	const compressed = try fileReadAll(allocator, f, @intCast(sz));
 	defer allocator.free(compressed);
-	_ = try f.readAll(compressed);
 
 	const decompressed = try bzip2.decompress(allocator, compressed);
 	defer allocator.free(decompressed);
 
-	const r = try std.process.Child.run(.{
-		.allocator = allocator,
-		.max_output_bytes = 16 * 1024 * 1024,
+	const r = try std.process.run(allocator, testIo(), .{
+		.stdout_limit = .limited(16 * 1024 * 1024),
 		.argv = &[_][]const u8{ "bunzip2", "-c", repro_path },
 	});
 	defer allocator.free(r.stdout);

@@ -1,16 +1,22 @@
 const std = @import("std");
 const bzip2 = @import("bzip2z").bzip2;
 
+fn fuzzIo() std.Io {
+	return std.Io.Threaded.global_single_threaded.io();
+}
+
 pub fn main() !void {
 	// Use GPA for memory safety checks
-	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
 	defer _ = gpa.deinit();
 	const allocator = gpa.allocator();
 
 	// Read input from stdin (AFL/honggfuzz style)
-	const stdin = std.fs.File.stdin();
+	const stdin = std.Io.File.stdin();
 	// Limit to reasonable size for round-trip testing (1MB)
-	const input = try stdin.readToEndAlloc(allocator, 1 * 1024 * 1024);
+	var stdin_buf: [64 * 1024]u8 = undefined;
+	var stdin_reader = stdin.readerStreaming(fuzzIo(), &stdin_buf);
+	const input = try stdin_reader.interface.readAlloc(allocator, 1 * 1024 * 1024);
 	defer allocator.free(input);
 
 	// 1. Compression
@@ -26,16 +32,19 @@ pub fn main() !void {
 	var decompressor = try bzip2.Decompressor.init(allocator);
 	defer decompressor.deinit();
 
-	// Using initCapacity to avoid 'init' issues if any, and pre-allocating is better anyway
-	var decompressed = std.ArrayList(u8).initCapacity(allocator, input.len) catch return;
+	// Pre-allocating to give the writer reasonable initial capacity
+	var decompressed: std.ArrayListUnmanaged(u8) = .{};
 	defer decompressed.deinit(allocator);
+	try decompressed.ensureTotalCapacity(allocator, input.len);
 
-	var fbs = std.io.fixedBufferStream(compressed);
-
-	decompressor.decompress(fbs.reader(), decompressed.writer(allocator)) catch |err| {
+	var fbs: std.Io.Reader = .fixed(compressed);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &decompressed);
+	decompressor.decompress(&fbs, &aw.writer) catch |err| {
+		decompressed = aw.toArrayList();
 		std.debug.print("Round-trip Decompression failed: {}\n", .{err});
 		@panic("Decompression failed on valid inputs!");
 	};
+	decompressed = aw.toArrayList();
 
 	// 3. Verification
 	if (!std.mem.eql(u8, input, decompressed.items)) {

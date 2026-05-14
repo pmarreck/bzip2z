@@ -2587,9 +2587,14 @@ pub fn compressWithOptions(allocator: Allocator, input: []const u8, options: Com
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer output.deinit(allocator);
 
-	const writer = output.writer(allocator);
-	var fbs = std.io.fixedBufferStream(input);
-	try compressStreamWithOptions(allocator, fbs.reader(), writer, options);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	errdefer aw.deinit();
+	var reader: std.Io.Reader = .fixed(input);
+	compressStreamWithOptions(allocator, &reader, &aw.writer, options) catch |err| {
+		output = aw.toArrayList();
+		return err;
+	};
+	output = aw.toArrayList();
 
 	return output.toOwnedSlice(allocator);
 }
@@ -2634,9 +2639,9 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 			}
 		} else {
 			const queue_capacity = @max(@as(usize, 1), thread_count * 2);
-			var tasks = try BoundedQueue(BlockTask).init(allocator, queue_capacity);
+			var tasks = try BoundedQueue(BlockTask).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 			defer tasks.deinit();
-			var results = try BoundedQueue(BlockResult).init(allocator, queue_capacity);
+			var results = try BoundedQueue(BlockResult).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 			defer results.deinit();
 
 			var cancel = std.atomic.Value(bool).init(false);
@@ -2773,9 +2778,9 @@ pub fn compressStreamWithOptions(allocator: Allocator, reader: anytype, writer: 
 	}
 
 	const queue_capacity = @max(@as(usize, 1), thread_count * 2);
-	var tasks = try BoundedQueue(BlockTask).init(allocator, queue_capacity);
+	var tasks = try BoundedQueue(BlockTask).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer tasks.deinit();
-	var results = try BoundedQueue(BlockResult).init(allocator, queue_capacity);
+	var results = try BoundedQueue(BlockResult).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer results.deinit();
 
 	var cancel = std.atomic.Value(bool).init(false);
@@ -2924,11 +2929,16 @@ fn decompressInternalWithOptions(allocator: Allocator, input: []const u8, check_
 	decompressor.progress_userdata = options.progress_userdata;
 	decompressor.progress_bytes_total = options.progress_bytes_total;
 
-	var input_stream = std.io.fixedBufferStream(input);
+	var input_reader: std.Io.Reader = .fixed(input);
 	var output_list: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer output_list.deinit(allocator);
 
-	try decompressor.decompressInternal(input_stream.reader(), output_list.writer(allocator), check_crc);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output_list);
+	decompressor.decompressInternal(&input_reader, &aw.writer, check_crc) catch |err| {
+		output_list = aw.toArrayList();
+		return err;
+	};
+	output_list = aw.toArrayList();
 
 	return output_list.toOwnedSlice(allocator);
 }
@@ -2940,25 +2950,25 @@ pub fn decompressFileToWriterWithOptions(
 	writer: anytype,
 	options: DecompressOptions,
 ) !void {
-	const file = try std.fs.cwd().openFile(path, .{});
-	defer file.close();
+	const file = try std.Io.Dir.cwd().openFile(std.Io.Threaded.global_single_threaded.io(), path, .{});
+	defer file.close(std.Io.Threaded.global_single_threaded.io());
 
 	if (!options.parallel or options.resolvedThreads() <= 1) {
 		var reader_buf: [64 * 1024]u8 = undefined;
-		var reader = file.reader(&reader_buf);
+		var reader = file.reader(std.Io.Threaded.global_single_threaded.io(), &reader_buf);
 		var decompressor = try Decompressor.init(allocator);
 		defer decompressor.deinit();
 		try decompressor.decompress(&reader.interface, writer);
 		return;
 	}
 
-	const stat = try file.stat();
+	const stat = try file.stat(std.Io.Threaded.global_single_threaded.io());
 	const offsets = try findStreamOffsetsInFile(allocator, file, stat.size);
 	defer allocator.free(offsets);
 
 	if (offsets.len <= 1 or offsets[0] != 0) {
 		var reader_buf: [64 * 1024]u8 = undefined;
-		var reader = file.reader(&reader_buf);
+		var reader = file.reader(std.Io.Threaded.global_single_threaded.io(), &reader_buf);
 		var decompressor = try Decompressor.init(allocator);
 		defer decompressor.deinit();
 		try decompressor.decompress(&reader.interface, writer);
@@ -3001,7 +3011,7 @@ fn findStreamOffsets(allocator: Allocator, input: []const u8) ![]usize {
 	return offsets.toOwnedSlice(allocator);
 }
 
-fn findStreamOffsetsInFile(allocator: Allocator, file: std.fs.File, size: u64) ![]u64 {
+fn findStreamOffsetsInFile(allocator: Allocator, file: std.Io.File, size: u64) ![]u64 {
 	var offsets: std.ArrayListUnmanaged(u64) = .empty;
 	errdefer offsets.deinit(allocator);
 
@@ -3011,7 +3021,7 @@ fn findStreamOffsetsInFile(allocator: Allocator, file: std.fs.File, size: u64) !
 	var pos: u64 = 0;
 
 	while (pos < size) {
-		const n = try file.pread(buf[0..], pos);
+		const n = try file.readPositionalAll(std.Io.Threaded.global_single_threaded.io(), buf[0..], pos);
 		if (n == 0) break;
 
 		const combined_len = tail_len + n;
@@ -3088,13 +3098,13 @@ fn decompressParallel(allocator: Allocator, input: []const u8, offsets: []const 
 		return decompressInternal(allocator, input, true);
 	}
 
-	var thread_safe = std.heap.ThreadSafeAllocator{ .child_allocator = allocator };
-	const thread_allocator = thread_safe.allocator();
+	// 0.16: base allocators are MT-safe; ThreadSafeAllocator removed.
+	const thread_allocator = allocator;
 
 	const queue_capacity = @max(@as(usize, 1), thread_count * 2);
-	var tasks = try BoundedQueue(StreamTask).init(allocator, queue_capacity);
+	var tasks = try BoundedQueue(StreamTask).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer tasks.deinit();
-	var results = try BoundedQueue(StreamResult).init(allocator, queue_capacity);
+	var results = try BoundedQueue(StreamResult).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer results.deinit();
 
 	var state = StreamWorkerState{
@@ -3200,12 +3210,12 @@ const FileStreamWorkerState = struct {
 };
 
 const FileSliceReader = struct {
-	file: std.fs.File,
+	file: std.Io.File,
 	start: u64,
 	end: u64,
 	pos: u64,
 
-	fn init(file: std.fs.File, start: u64, end: u64) FileSliceReader {
+	fn init(file: std.Io.File, start: u64, end: u64) FileSliceReader {
 		return .{
 			.file = file,
 			.start = start,
@@ -3218,7 +3228,7 @@ const FileSliceReader = struct {
 		if (self.pos >= self.end) return 0;
 		const remaining = self.end - self.pos;
 		const max_len: usize = @intCast(@min(@as(u64, buffer.len), remaining));
-		const n = try self.file.pread(buffer[0..max_len], self.pos);
+		const n = try self.file.readPositionalAll(std.Io.Threaded.global_single_threaded.io(), buffer[0..max_len], self.pos);
 		self.pos += n;
 		return n;
 	}
@@ -3227,11 +3237,11 @@ const FileSliceReader = struct {
 fn fileStreamWorkerLoop(state: *FileStreamWorkerState) void {
 	while (true) {
 		const task_opt = state.tasks.dequeue() orelse break;
-		const file = std.fs.cwd().openFile(state.path, .{}) catch |err| {
+		const file = std.Io.Dir.cwd().openFile(std.Io.Threaded.global_single_threaded.io(), state.path, .{}) catch |err| {
 			_ = state.results.enqueue(.{ .index = task_opt.index, .result = err });
 			continue;
 		};
-		defer file.close();
+		defer file.close(std.Io.Threaded.global_single_threaded.io());
 
 		var reader = FileSliceReader.init(file, task_opt.start, task_opt.end);
 		var decompressor = Decompressor.init(state.allocator) catch |err| {
@@ -3241,7 +3251,9 @@ fn fileStreamWorkerLoop(state: *FileStreamWorkerState) void {
 		defer decompressor.deinit();
 
 		var output: std.ArrayListUnmanaged(u8) = .empty;
-		const result = decompressor.decompressInternal(&reader, output.writer(state.allocator), state.check_crc);
+		var aw: std.Io.Writer.Allocating = .fromArrayList(state.allocator, &output);
+		const result = decompressor.decompressInternal(&reader, &aw.writer, state.check_crc);
+		output = aw.toArrayList();
 		if (result) |_| {
 			_ = state.results.enqueue(.{ .index = task_opt.index, .result = output.toOwnedSlice(state.allocator) });
 		} else |err| {
@@ -3262,23 +3274,23 @@ fn decompressFileParallel(
 	const stream_count = offsets.len;
 	const thread_count = @min(options.resolvedThreads(), stream_count);
 	if (thread_count <= 1) {
-		const file = try std.fs.cwd().openFile(path, .{});
-		defer file.close();
+		const file = try std.Io.Dir.cwd().openFile(std.Io.Threaded.global_single_threaded.io(), path, .{});
+		defer file.close(std.Io.Threaded.global_single_threaded.io());
 		var reader_buf: [64 * 1024]u8 = undefined;
-		var reader = file.reader(&reader_buf);
+		var reader = file.reader(std.Io.Threaded.global_single_threaded.io(), &reader_buf);
 		var decompressor = try Decompressor.init(allocator);
 		defer decompressor.deinit();
 		try decompressor.decompress(&reader.interface, writer);
 		return;
 	}
 
-	var thread_safe = std.heap.ThreadSafeAllocator{ .child_allocator = allocator };
-	const thread_allocator = thread_safe.allocator();
+	// 0.16: base allocators are MT-safe; ThreadSafeAllocator removed.
+	const thread_allocator = allocator;
 
 	const queue_capacity = @max(@as(usize, 1), thread_count * 2);
-	var tasks = try BoundedQueue(FileStreamTask).init(allocator, queue_capacity);
+	var tasks = try BoundedQueue(FileStreamTask).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer tasks.deinit();
-	var results = try BoundedQueue(FileStreamResult).init(allocator, queue_capacity);
+	var results = try BoundedQueue(FileStreamResult).init(allocator, std.Io.Threaded.global_single_threaded.io(), queue_capacity);
 	defer results.deinit();
 
 	var state = FileStreamWorkerState{
@@ -3348,8 +3360,8 @@ fn decompressFileParallel(
 /// Decompress bzip2 data from a file path.
 /// Caller owns the returned slice and must free it with the provided allocator.
 pub fn decompressFile(allocator: Allocator, path: []const u8) ![]u8 {
-	const file = try std.fs.cwd().openFile(path, .{});
-	defer file.close();
+	const file = try std.Io.Dir.cwd().openFile(std.Io.Threaded.global_single_threaded.io(), path, .{});
+	defer file.close(std.Io.Threaded.global_single_threaded.io());
 
 	var decompressor = try Decompressor.init(allocator);
 	defer decompressor.deinit();
@@ -3540,8 +3552,8 @@ test "block magic values" {
 
 test "BitReader - read aligned bytes" {
 	const data = [_]u8{ 0xAB, 0xCD, 0xEF };
-	var stream = std.io.fixedBufferStream(&data);
-	var reader = BitReader(@TypeOf(stream.reader())).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(&data);
+	var reader = BitReader(*std.Io.Reader).init(&stream);
 
 	// Read 8 bits at a time (byte aligned)
 	const b1 = try reader.readBits(8);
@@ -3554,8 +3566,8 @@ test "BitReader - read aligned bytes" {
 test "BitReader - read unaligned bits" {
 	// Binary: 1010 1100 1101 0011
 	const data = [_]u8{ 0xAC, 0xD3 };
-	var stream = std.io.fixedBufferStream(&data);
-	var reader = BitReader(@TypeOf(stream.reader())).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(&data);
+	var reader = BitReader(*std.Io.Reader).init(&stream);
 
 	// Read 4 bits: should be 1010 = 0xA
 	const b1 = try reader.readBits(4);
@@ -3573,8 +3585,8 @@ test "BitReader - read unaligned bits" {
 test "BitReader - read single bits" {
 	// Binary: 1010 0101
 	const data = [_]u8{0xA5};
-	var stream = std.io.fixedBufferStream(&data);
-	var reader = BitReader(@TypeOf(stream.reader())).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(&data);
+	var reader = BitReader(*std.Io.Reader).init(&stream);
 
 	// Read bit by bit
 	try std.testing.expectEqual(@as(u1, 1), try reader.readBit());
@@ -3598,9 +3610,9 @@ test "HuffmanTable - simple 2 symbol table" {
 
 	// Decode from bit stream
 	const data = [_]u8{0b10100000}; // bits: 1, 0, 1, 0, ...
-	var stream = std.io.fixedBufferStream(&data);
-	const ReaderType = @TypeOf(stream.reader());
-	var reader = BitReader(ReaderType).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(&data);
+	const ReaderType = *std.Io.Reader;
+	var reader = BitReader(ReaderType).init(&stream);
 
 	// First bit is 1 -> symbol 1
 	const s1 = try table.decode(ReaderType, &reader);
@@ -3622,9 +3634,9 @@ test "HuffmanTable - varying code lengths" {
 	// bits: 0 10 110 111 = A B C D
 	// binary: 0101 1011 1... = 0x5B...
 	const data = [_]u8{ 0x5B, 0x80 };
-	var stream = std.io.fixedBufferStream(&data);
-	const ReaderType = @TypeOf(stream.reader());
-	var reader = BitReader(ReaderType).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(&data);
+	const ReaderType = *std.Io.Reader;
+	var reader = BitReader(ReaderType).init(&stream);
 
 	try std.testing.expectEqual(@as(u16, 0), try table.decode(ReaderType, &reader)); // A
 	try std.testing.expectEqual(@as(u16, 1), try table.decode(ReaderType, &reader)); // B
@@ -3839,8 +3851,8 @@ test "RLE block reader caps encoded length" {
 		@memset(data[start .. start + run_len], byte);
 	}
 
-	var fbs = std.io.fixedBufferStream(data);
-	var reader = RleBlockReader(@TypeOf(fbs.reader())).init(fbs.reader());
+	var fbs: std.Io.Reader = .fixed(data);
+	var reader = RleBlockReader(*std.Io.Reader).init(&fbs);
 	defer reader.deinit(allocator);
 
 	var rebuilt: std.ArrayListUnmanaged(u8) = .empty;
@@ -3970,10 +3982,12 @@ test "BWT performance - 50KB should complete in under 500ms" {
 		b.* = @truncate((i *% 31 +% 17) ^ (i >> 8));
 	}
 
-	const start = std.time.nanoTimestamp();
+	const io = std.Io.Threaded.global_single_threaded.io();
+	const start = std.Io.Clock.Timestamp.now(io, .awake);
 	const result = try bwtEncode(allocator, data);
 	defer allocator.free(result.data);
-	const elapsed_ms = @divTrunc(std.time.nanoTimestamp() - start, 1_000_000);
+	const end = std.Io.Clock.Timestamp.now(io, .awake);
+	const elapsed_ms = start.durationTo(end).raw.toMilliseconds();
 
 	// Must complete in under 500ms (naive O(n²) would take minutes)
 	try std.testing.expect(elapsed_ms < 500);
@@ -4053,8 +4067,9 @@ test "BitWriter - write bytes" {
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const stream_writer = output.writer(allocator);
-	const byte_writer = ByteWriter(@TypeOf(stream_writer)).init(stream_writer);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const byte_writer = ByteWriter(*std.Io.Writer).init(&aw.writer);
 	var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
 
 	// Write 8 bits at a time (byte aligned)
@@ -4062,7 +4077,7 @@ test "BitWriter - write bytes" {
 	try writer.writeBits(0xCD, 8);
 	try writer.flush();
 
-	try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAB, 0xCD }, output.items);
+	try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAB, 0xCD }, aw.writer.buffered());
 }
 
 test "BitWriter - write unaligned bits" {
@@ -4070,8 +4085,9 @@ test "BitWriter - write unaligned bits" {
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const stream_writer = output.writer(allocator);
-	const byte_writer = ByteWriter(@TypeOf(stream_writer)).init(stream_writer);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const byte_writer = ByteWriter(*std.Io.Writer).init(&aw.writer);
 	var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
 
 	// Write 4 bits: 1010
@@ -4081,7 +4097,7 @@ test "BitWriter - write unaligned bits" {
 	// Should produce 0xAC
 	try writer.flush();
 
-	try std.testing.expectEqualSlices(u8, &[_]u8{0xAC}, output.items);
+	try std.testing.expectEqualSlices(u8, &[_]u8{0xAC}, aw.writer.buffered());
 }
 
 test "BitWriter - write 32 bits" {
@@ -4089,15 +4105,16 @@ test "BitWriter - write 32 bits" {
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const stream_writer = output.writer(allocator);
-	const byte_writer = ByteWriter(@TypeOf(stream_writer)).init(stream_writer);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const byte_writer = ByteWriter(*std.Io.Writer).init(&aw.writer);
 	var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
 
 	// Write 32 bits
 	try writer.writeBits(0xDEADBEEF, 32);
 	try writer.flush();
 
-	try std.testing.expectEqualSlices(u8, &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF }, output.items);
+	try std.testing.expectEqualSlices(u8, &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF }, aw.writer.buffered());
 }
 
 test "BitWriter - write single bits" {
@@ -4105,8 +4122,9 @@ test "BitWriter - write single bits" {
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const stream_writer = output.writer(allocator);
-	const byte_writer = ByteWriter(@TypeOf(stream_writer)).init(stream_writer);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	defer output = aw.toArrayList();
+	const byte_writer = ByteWriter(*std.Io.Writer).init(&aw.writer);
 	var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
 
 	// Write 10100101 bit by bit
@@ -4120,7 +4138,7 @@ test "BitWriter - write single bits" {
 	try writer.writeBit(1);
 	try writer.flush();
 
-	try std.testing.expectEqualSlices(u8, &[_]u8{0xA5}, output.items);
+	try std.testing.expectEqualSlices(u8, &[_]u8{0xA5}, aw.writer.buffered());
 }
 
 test "buildHuffmanCodes - uniform lengths" {
@@ -4156,27 +4174,30 @@ test "Huffman encode-decode round-trip" {
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	defer output.deinit(allocator);
 
-	const stream_writer = output.writer(allocator);
-	const byte_writer = ByteWriter(@TypeOf(stream_writer)).init(stream_writer);
-	var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
+	{
+		var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+		defer output = aw.toArrayList();
+		const byte_writer = ByteWriter(*std.Io.Writer).init(&aw.writer);
+		var writer = BitWriter(@TypeOf(byte_writer)).init(byte_writer);
 
-	// Write symbol 0 (code 00, len 2)
-	try writer.writeBits(codes[0], 2);
-	// Write symbol 1 (code 01, len 2)
-	try writer.writeBits(codes[1], 2);
-	// Write symbol 2 (code 10, len 3)
-	// Wait, let me recalculate...
+		// Write symbol 0 (code 00, len 2)
+		try writer.writeBits(codes[0], 2);
+		// Write symbol 1 (code 01, len 2)
+		try writer.writeBits(codes[1], 2);
+		// Write symbol 2 (code 10, len 3)
+		// Wait, let me recalculate...
 
-	try writer.flush();
+		try writer.flush();
+	}
 
 	// Build HuffmanTable for decoding
 	var table = HuffmanTable.init();
 	try table.build(&lengths, 4);
 
 	// Read back using BitReader
-	var stream = std.io.fixedBufferStream(output.items);
-	const ReaderType = @TypeOf(stream.reader());
-	var reader = BitReader(ReaderType).init(stream.reader());
+	var stream: std.Io.Reader = .fixed(output.items);
+	const ReaderType = *std.Io.Reader;
+	var reader = BitReader(ReaderType).init(&stream);
 
 	// Decode symbols
 	const sym0 = try table.decode(ReaderType, &reader);

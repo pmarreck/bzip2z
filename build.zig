@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
 		.root_source_file = b.path("src/lib.zig"),
 		.target = target,
 		.optimize = optimize,
+		.link_libc = true,
 	});
 
 	const lib = b.addLibrary(.{
@@ -21,13 +22,13 @@ pub fn build(b: *std.Build) void {
 		.root_source_file = b.path("src/ffi.zig"),
 		.target = target,
 		.optimize = optimize,
+		.link_libc = true,
 	});
 	const ffi_lib = b.addLibrary(.{
 		.name = "bzip2z_ffi",
 		.root_module = ffi_mod,
 		.linkage = .static,
 	});
-	ffi_lib.linkLibC();
 	b.installArtifact(ffi_lib);
 
 	const is_windows = target.result.os.tag == .windows;
@@ -43,64 +44,67 @@ pub fn build(b: *std.Build) void {
 	else
 		&.{ "-std=c11" };
 
+	const cli_mod = b.createModule(.{
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	cli_mod.addIncludePath(b.path("c/include"));
+	cli_mod.addCSourceFile(.{
+		.file = b.path("c/cli.c"),
+		.flags = cli_c_flags,
+	});
+	cli_mod.linkLibrary(ffi_lib);
+	if (progrez_lib) |pl| {
+		cli_mod.linkLibrary(pl);
+		cli_mod.addIncludePath(progrez_dep.path("include"));
+	}
 	const cli = b.addExecutable(.{
 		.name = "bzip2z",
-		.root_module = b.createModule(.{
-			.target = target,
-			.optimize = optimize,
-		}),
+		.root_module = cli_mod,
 	});
-	cli.linkLibC();
-	cli.addIncludePath(b.path("c/include"));
-	cli.addCSourceFile(.{
-		.file = b.path("c/cli.c"),
-		.flags = cli_c_flags,
-	});
-	cli.linkLibrary(ffi_lib);
-	if (progrez_lib) |pl| {
-		cli.linkLibrary(pl);
-		cli.root_module.addIncludePath(progrez_dep.path("include"));
-	}
 	b.installArtifact(cli);
 
+	const bunzip2_mod = b.createModule(.{
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	bunzip2_mod.addIncludePath(b.path("c/include"));
+	bunzip2_mod.addCSourceFile(.{
+		.file = b.path("c/cli.c"),
+		.flags = cli_c_flags,
+	});
+	bunzip2_mod.linkLibrary(ffi_lib);
+	if (progrez_lib) |pl| {
+		bunzip2_mod.linkLibrary(pl);
+		bunzip2_mod.addIncludePath(progrez_dep.path("include"));
+	}
 	const bunzip2 = b.addExecutable(.{
 		.name = "bunzip2z",
-		.root_module = b.createModule(.{
-			.target = target,
-			.optimize = optimize,
-		}),
+		.root_module = bunzip2_mod,
 	});
-	bunzip2.linkLibC();
-	bunzip2.addIncludePath(b.path("c/include"));
-	bunzip2.addCSourceFile(.{
-		.file = b.path("c/cli.c"),
-		.flags = cli_c_flags,
-	});
-	bunzip2.linkLibrary(ffi_lib);
-	if (progrez_lib) |pl| {
-		bunzip2.linkLibrary(pl);
-		bunzip2.root_module.addIncludePath(progrez_dep.path("include"));
-	}
 	b.installArtifact(bunzip2);
 
-	const bzcat = b.addExecutable(.{
-		.name = "bzcatz",
-		.root_module = b.createModule(.{
-			.target = target,
-			.optimize = optimize,
-		}),
+	const bzcat_mod = b.createModule(.{
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
 	});
-	bzcat.linkLibC();
-	bzcat.addIncludePath(b.path("c/include"));
-	bzcat.addCSourceFile(.{
+	bzcat_mod.addIncludePath(b.path("c/include"));
+	bzcat_mod.addCSourceFile(.{
 		.file = b.path("c/cli.c"),
 		.flags = cli_c_flags,
 	});
-	bzcat.linkLibrary(ffi_lib);
+	bzcat_mod.linkLibrary(ffi_lib);
 	if (progrez_lib) |pl| {
-		bzcat.linkLibrary(pl);
-		bzcat.root_module.addIncludePath(progrez_dep.path("include"));
+		bzcat_mod.linkLibrary(pl);
+		bzcat_mod.addIncludePath(progrez_dep.path("include"));
 	}
+	const bzcat = b.addExecutable(.{
+		.name = "bzcatz",
+		.root_module = bzcat_mod,
+	});
 	b.installArtifact(bzcat);
 
 	const run_cli = b.addRunArtifact(cli);
@@ -129,6 +133,7 @@ pub fn build(b: *std.Build) void {
 		.root_source_file = b.path("bench/bench_bzip2.zig"),
 		.target = target,
 		.optimize = optimize,
+		.link_libc = true,
 		.imports = &.{
 			.{ .name = "bzip2z", .module = lib_mod },
 		},

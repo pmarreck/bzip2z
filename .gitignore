@@ -1,6 +1,13 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 .DS_Store
 AGENTS.md
 .codescan
 result
+# vendor/progrez is a temporary local checkout used to apply
+# zig-0.16 patches to the dependency until progrez's own upgrade
+# lands. Its inner .git/.zig-cache should not be tracked.
+vendor/progrez/.git/
+vendor/progrez/.zig-cache/
+vendor/progrez/zig-out/

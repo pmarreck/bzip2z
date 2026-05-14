@@ -14,8 +14,7 @@
 	.fingerprint = 0x8e3eb16965d939b,
 	.dependencies = .{
 		.progrez = .{
-			.url = "https://github.com/pmarreck/progrez/archive/yolo.tar.gz",
-			.hash = "progrez-0.1.0-0YJXrrECAgDFEpz8h967WNEcUdTIk8Si1UR6Q8IlUm90",
+			.path = "vendor/progrez",
 		},
 	},
 }

@@ -12,10 +12,32 @@ const bzip2 = @import("bzip2z").bzip2;
 const Allocator = std.mem.Allocator;
 var tmp_counter = std.atomic.Value(usize).init(0);
 
-// Zig 0.15 compatible I/O helpers
+fn benchIo() std.Io {
+	return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn nowNs() i128 {
+	const ts = std.Io.Clock.Timestamp.now(benchIo(), .awake);
+	return ts.raw.toNanoseconds();
+}
+
+fn getEnvOwned(allocator: Allocator, key: [*:0]const u8) ?[]u8 {
+	const c_val = std.c.getenv(key) orelse return null;
+	const slice = std.mem.span(c_val);
+	return allocator.dupe(u8, slice) catch null;
+}
+
+fn fileWriteAll(file: std.Io.File, data: []const u8) !void {
+	var buf: [4096]u8 = undefined;
+	var w = file.writer(benchIo(), &buf);
+	try w.interface.writeAll(data);
+	try w.interface.flush();
+}
+
+// 0.16 I/O helpers
 fn stdoutPrint(comptime fmt: []const u8, args: anytype) void {
 	var buf: [8192]u8 = undefined;
-	var stdout_writer = std.fs.File.stdout().writer(&buf);
+	var stdout_writer = std.Io.File.stdout().writer(benchIo(), &buf);
 	const stdout = &stdout_writer.interface;
 	stdout.print(fmt, args) catch return;
 	stdout.flush() catch return;
@@ -23,23 +45,23 @@ fn stdoutPrint(comptime fmt: []const u8, args: anytype) void {
 
 fn stderrPrint(comptime fmt: []const u8, args: anytype) void {
 	var buf: [8192]u8 = undefined;
-	var stderr_writer = std.fs.File.stderr().writer(&buf);
+	var stderr_writer = std.Io.File.stderr().writer(benchIo(), &buf);
 	const stderr = &stderr_writer.interface;
 	stderr.print(fmt, args) catch return;
 	stderr.flush() catch return;
 }
 
 fn tmpPath(allocator: Allocator, name: []const u8) ![]u8 {
-	const tmpdir_owned = std.process.getEnvVarOwned(allocator, "TMPDIR") catch null;
-	const tmpdir = if (tmpdir_owned) |value| value else "/tmp";
+	const tmpdir_owned = getEnvOwned(allocator, "TMPDIR");
 	defer if (tmpdir_owned) |value| allocator.free(value);
+	const tmpdir = if (tmpdir_owned) |value| value else "/tmp";
 
 	const id = tmp_counter.fetchAdd(1, .seq_cst);
 	return try std.fmt.allocPrint(allocator, "{s}/{s}-{d}", .{ tmpdir, name, id });
 }
 
 fn findPbzip2(allocator: Allocator) ?[]u8 {
-	const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return null;
+	const path_env = getEnvOwned(allocator, "PATH") orelse return null;
 	defer allocator.free(path_env);
 
 	var it = std.mem.splitScalar(u8, path_env, ':');
@@ -50,7 +72,9 @@ fn findPbzip2(allocator: Allocator) ?[]u8 {
 			allocator.free(full);
 			continue;
 		}
-		if (std.fs.accessAbsolute(full, .{})) |_| {
+		// Probe accessibility via openFile (closeable file is sufficient evidence)
+		if (std.Io.Dir.cwd().openFile(benchIo(), full, .{})) |file| {
+			file.close(benchIo());
 			return full;
 		} else |_| {
 			allocator.free(full);
@@ -246,19 +270,19 @@ const BenchResult = struct {
 /// Benchmark our Zig bzip2 implementation
 fn benchZigBzip2(data: []const u8, options: bzip2.CompressOptions) !BenchResult {
 	// Use standard allocator (memory tracking via GPA is unreliable across Zig versions)
-	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
 	defer _ = gpa.deinit();
 	const allocator = gpa.allocator();
 
 	// Compress
-	const compress_start = std.time.nanoTimestamp();
+	const compress_start = nowNs();
 	const compressed = try bzip2.compressWithOptions(allocator, data, options);
-	const compress_end = std.time.nanoTimestamp();
+	const compress_end = nowNs();
 
 	// Decompress
-	const decompress_start = std.time.nanoTimestamp();
+	const decompress_start = nowNs();
 	const decompressed = try bzip2.decompress(allocator, compressed);
-	const decompress_end = std.time.nanoTimestamp();
+	const decompress_end = nowNs();
 
 	// Verify correctness
 	if (!std.mem.eql(u8, data, decompressed)) {
@@ -290,41 +314,39 @@ fn benchSystemBzip2(allocator: Allocator, data: []const u8) !BenchResult {
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(data);
+		const file = try std.Io.Dir.cwd().createFile(benchIo(), tmp_path, .{});
+		defer file.close(benchIo());
+		try fileWriteAll(file, data);
 	}
-	defer std.fs.cwd().deleteFile(tmp_path) catch {};
-	defer std.fs.cwd().deleteFile(bz2_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(benchIo(), tmp_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(benchIo(), bz2_path) catch {};
 
 	// Compress with system bzip2
-	const compress_start = std.time.nanoTimestamp();
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_start = nowNs();
+	const compress_result = std.process.run(allocator, benchIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-k", "-f", "-9", tmp_path },
 	}) catch |err| {
 		stderrPrint("System bzip2 failed: {s}\n", .{@errorName(err)});
 		return err;
 	};
-	const compress_end = std.time.nanoTimestamp();
+	const compress_end = nowNs();
 	allocator.free(compress_result.stdout);
 	allocator.free(compress_result.stderr);
 
 	// Read compressed size
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	const compressed_size = try bz2_file.getEndPos();
-	bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(benchIo(), bz2_path, .{});
+	const compressed_size = (try bz2_file.stat(benchIo())).size;
+	bz2_file.close(benchIo());
 
 	// Decompress with system bzip2
-	const decompress_start = std.time.nanoTimestamp();
-	const decompress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const decompress_start = nowNs();
+	const decompress_result = std.process.run(allocator, benchIo(), .{
 		.argv = &[_][]const u8{ "bzip2", "-d", "-k", "-f", bz2_path },
 	}) catch |err| {
 		stderrPrint("System bzip2 decompress failed: {s}\n", .{@errorName(err)});
 		return err;
 	};
-	const decompress_end = std.time.nanoTimestamp();
+	const decompress_end = nowNs();
 	allocator.free(decompress_result.stdout);
 	allocator.free(decompress_result.stderr);
 
@@ -346,19 +368,18 @@ fn benchPbzip2(allocator: Allocator, pbzip2_path: []const u8, data: []const u8, 
 	defer allocator.free(bz2_path);
 
 	{
-		const file = try std.fs.cwd().createFile(tmp_path, .{});
-		defer file.close();
-		try file.writeAll(data);
+		const file = try std.Io.Dir.cwd().createFile(benchIo(), tmp_path, .{});
+		defer file.close(benchIo());
+		try fileWriteAll(file, data);
 	}
-	defer std.fs.cwd().deleteFile(tmp_path) catch {};
-	defer std.fs.cwd().deleteFile(bz2_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(benchIo(), tmp_path) catch {};
+	defer std.Io.Dir.cwd().deleteFile(benchIo(), bz2_path) catch {};
 
 	// Compress with pbzip2
 	const threads_arg = try std.fmt.allocPrint(allocator, "-p{d}", .{threads});
 	defer allocator.free(threads_arg);
-	const compress_start = std.time.nanoTimestamp();
-	const compress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const compress_start = nowNs();
+	const compress_result = std.process.run(allocator, benchIo(), .{
 		.argv = &[_][]const u8{
 			pbzip2_path,
 			"-k",
@@ -371,25 +392,24 @@ fn benchPbzip2(allocator: Allocator, pbzip2_path: []const u8, data: []const u8, 
 		stderrPrint("pbzip2 failed: {s}\n", .{@errorName(err)});
 		return err;
 	};
-	const compress_end = std.time.nanoTimestamp();
+	const compress_end = nowNs();
 	allocator.free(compress_result.stdout);
 	allocator.free(compress_result.stderr);
 
 	// Read compressed size
-	const bz2_file = try std.fs.cwd().openFile(bz2_path, .{});
-	const compressed_size = try bz2_file.getEndPos();
-	bz2_file.close();
+	const bz2_file = try std.Io.Dir.cwd().openFile(benchIo(), bz2_path, .{});
+	const compressed_size = (try bz2_file.stat(benchIo())).size;
+	bz2_file.close(benchIo());
 
 	// Decompress with pbzip2
-	const decompress_start = std.time.nanoTimestamp();
-	const decompress_result = std.process.Child.run(.{
-		.allocator = allocator,
+	const decompress_start = nowNs();
+	const decompress_result = std.process.run(allocator, benchIo(), .{
 		.argv = &[_][]const u8{ pbzip2_path, "-d", "-k", "-f", bz2_path },
 	}) catch |err| {
 		stderrPrint("pbzip2 decompress failed: {s}\n", .{@errorName(err)});
 		return err;
 	};
-	const decompress_end = std.time.nanoTimestamp();
+	const decompress_end = nowNs();
 	allocator.free(decompress_result.stdout);
 	allocator.free(decompress_result.stderr);
 
@@ -413,7 +433,7 @@ fn formatSize(size: usize) struct { value: f64, unit: []const u8 } {
 }
 
 pub fn main() !u8 {
-	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
 	defer _ = gpa.deinit();
 	const allocator = gpa.allocator();
 
