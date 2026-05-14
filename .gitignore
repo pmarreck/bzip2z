@@ -11,3 +11,4 @@ result
 vendor/progrez/.git/
 vendor/progrez/.zig-cache/
 vendor/progrez/zig-out/
+.direnv/
