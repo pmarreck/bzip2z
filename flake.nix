@@ -3,20 +3,25 @@
 
 	inputs = {
 		nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+		zig-overlay = {
+			url = "github:mitchellh/zig-overlay";
+			inputs.nixpkgs.follows = "nixpkgs";
+		};
 	};
 
-	outputs = { self, nixpkgs }:
+	outputs = { self, nixpkgs, zig-overlay }:
 		let
 			pname = "bzip2z";
 			version = "0.1.0";
 			devSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 			ciHostSystems = [ "x86_64-linux" ];
 			allBuildSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
-			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
+			zigFor = system: zig-overlay.packages.${system}."0.16.0";
+			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }) (zigFor system));
 
 			zigDepsHash = "sha256-pORP+du2u2gdE5A72LrICr0jD63tlHGSn92Z6e55RKo=";
 
-			mkZigDeps = pkgs: pkgs.stdenv.mkDerivation {
+			mkZigDeps = pkgs: zig: pkgs.stdenv.mkDerivation {
 				pname = "${pname}-zig-deps";
 				inherit version;
 				src = self;
@@ -35,10 +40,10 @@
 				dontFixup = true;
 			};
 
-			mkCiPackage = pkgs: name: zigTarget: runTests:
+			mkCiPackage = pkgs: zig: name: zigTarget: runTests:
 				let
 					isDarwin = pkgs.stdenv.isDarwin;
-					zigDeps = mkZigDeps pkgs;
+					zigDeps = mkZigDeps pkgs zig;
 				in
 				pkgs.stdenv.mkDerivation {
 					pname = "${pname}-${name}";
@@ -49,7 +54,7 @@
 					nativeBuildInputs = [
 						pkgs.bash
 						pkgs.coreutils
-						pkgs.zig
+						zig
 						pkgs.bzip2
 						pkgs.pbzip2
 					] ++ pkgs.lib.optionals isDarwin [
@@ -85,10 +90,10 @@
 					'';
 				};
 		in {
-			devShells = forSystems devSystems (system: pkgs: {
+			devShells = forSystems devSystems (system: pkgs: zig: {
 				default = pkgs.mkShell {
 					packages = [
-						pkgs.zig
+						zig
 						pkgs.zls
 						pkgs.git
 						pkgs.ripgrep
@@ -104,13 +109,13 @@
 			});
 
 			# Expose zigDeps for hash discovery on any build system
-			legacyPackages = forSystems allBuildSystems (system: pkgs: {
-				zigDeps = mkZigDeps pkgs;
+			legacyPackages = forSystems allBuildSystems (system: pkgs: zig: {
+				zigDeps = mkZigDeps pkgs zig;
 			});
 
-			packages = forSystems allBuildSystems (system: pkgs:
+			packages = forSystems allBuildSystems (system: pkgs: zig:
 				let
-					mk = name: target: runTests: mkCiPackage pkgs name target runTests;
+					mk = name: target: runTests: mkCiPackage pkgs zig name target runTests;
 					nativeTarget = {
 						"x86_64-linux" = "x86_64-linux-gnu";
 						"aarch64-linux" = "aarch64-linux-gnu";
@@ -132,7 +137,7 @@
 					ci-windows-aarch64 = mk "windows-aarch64" "aarch64-windows-gnu" false;
 				});
 
-			checks = forSystems ciHostSystems (system: pkgs:
+			checks = forSystems ciHostSystems (system: pkgs: zig:
 				let p = self.packages.${system};
 				in {
 					unit-and-cli-tests = p.ci-tests;
