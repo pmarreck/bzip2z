@@ -1,9 +1,0 @@
-zig-out/
-zig-cache/
-.zig-cache/
-.direnv/
-result
-jj_cheatsheet.md
-AGENTS.md
-.DS_Store
-ZIG_RECENT_API_CHANGES_2025.md

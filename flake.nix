@@ -19,7 +19,7 @@
 			zigFor = system: zig-overlay.packages.${system}."0.16.0";
 			forSystems = systems: f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }) (zigFor system));
 
-			zigDepsHash = "sha256-pORP+du2u2gdE5A72LrICr0jD63tlHGSn92Z6e55RKo=";
+			zigDepsHash = "sha256-KrwTu200E7aiyP2PUTQLx6umntZTBWBxt3Bohx0wyBM=";
 
 			mkZigDeps = pkgs: zig: pkgs.stdenv.mkDerivation {
 				pname = "${pname}-zig-deps";
