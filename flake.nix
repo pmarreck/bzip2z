@@ -88,9 +88,19 @@
 						done
 						[ $rc -eq 0 ] || { echo "Unit/bench tests failed"; exit 1; }
 						patchShebangs build tests/cli_test
-						mv zig-out/bin/bzip2z zig-out/bin/bzip2z.real
-						printf "%s\n%s\n" "#!${pkgs.runtimeShell}" "exec $DL_PATH \"$PWD/zig-out/bin/bzip2z.real\" \"\$@\"" > zig-out/bin/bzip2z
-						chmod +x zig-out/bin/bzip2z
+						# Wrap all binaries in zig-out/bin via Nix's loader.
+						for orig in zig-out/bin/*; do
+							[ -f "$orig" ] || continue
+							[ -x "$orig" ] || continue
+							case "$orig" in *.real) continue ;; esac
+							mv "$orig" "$orig.real"
+							cat > "$orig" <<WRAPPER
+#!${pkgs.runtimeShell}
+exec "$DL_PATH" "\$(dirname "\$0")/\$(basename "\$0").real" "\$@"
+WRAPPER
+							chmod +x "$orig"
+						done
+						ls -la zig-out/bin/
 						bash tests/cli_test
 						''}
 						${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) ''
