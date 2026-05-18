@@ -149,7 +149,14 @@ if ! command -v bzip2 >/dev/null 2>&1; then
 	exit 0
 fi
 
-"$build_cmd" >/dev/null
+# Allow CI / nix-build to skip the implicit rebuild — when SKIP_BUILD=1, the
+# caller has already prepared zig-out/bin (and possibly wrapped binaries with
+# patchShebangs / loader wrappers). Re-running ./build inside a Nix sandbox
+# would call `nix build` recursively, which either fails or overwrites the
+# wrapped binaries with raw ELFs that lack a usable dynamic interpreter.
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+	"$build_cmd" >/dev/null
+fi
 
 bin_dir="$root_dir/zig-out/bin"
 cli="${BZIP2Z_CLI:-$bin_dir/bzip2z}"
