@@ -101,13 +101,13 @@ WRAPPER
 							chmod +x "$orig"
 						done
 						ls -la zig-out/bin/
-						bash tests/cli_test
+						SKIP_BUILD=1 bash tests/cli_test
 						''}
 						${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) ''
 						zig build test
 						zig build
 						patchShebangs build tests/cli_test
-						bash tests/cli_test
+						SKIP_BUILD=1 bash tests/cli_test
 						''}
 						'' else ":"}
 						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
