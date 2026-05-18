@@ -100,6 +100,14 @@ exec "$DL_PATH" "\$(dirname "\$0")/\$(basename "\$0").real" "\$@"
 WRAPPER
 							chmod +x "$orig"
 						done
+						echo "--- wrapper script content ---"
+						cat zig-out/bin/bzip2z
+						echo "--- direct loader test ---"
+						"$DL_PATH" zig-out/bin/bzip2z.real --about
+						echo "DIRECT_RC=$?"
+						echo "--- wrapper test ---"
+						zig-out/bin/bzip2z --about
+						echo "WRAPPER_RC=$?"
 						ls -la zig-out/bin/
 						bash tests/cli_test
 						''}
