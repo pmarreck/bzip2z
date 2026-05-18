@@ -60,8 +60,7 @@
 					] ++ pkgs.lib.optionals isDarwin [
 						pkgs.darwin.cctools
 						pkgs.apple-sdk
-					]
-					++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ];
+					];
 
 					buildPhase = ''
 						runHook preBuild
@@ -74,18 +73,14 @@
 						${if runTests then ''
 						# On Linux, Zig's link_libc bakes /lib64/ld-linux-x86-64.so.2 as
 						# the dynamic linker, which does not exist in the Nix sandbox.
-						# Compile tests first, patchelf them, then run.
+						# Tell Zig to bake Nix's loader path directly via -Ddynamic-linker
+						# instead of relying on patchelf (which aborts on Zig 0.16 ELFs).
+						ZIG_DL_ARG=""
 						${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-						zig build test-compile
-						DL="$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
-						for d in .zig-cache zig-out; do
-							[ -d "$d" ] || continue
-							for f in $(find "$d" -type f -perm -u+x); do
-								patchelf --set-interpreter "$DL" "$f" 2>/dev/null || true
-							done
-						done
+						ZIG_DL_ARG="-Ddynamic-linker=$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
 						''}
-						zig build test
+						zig build test $ZIG_DL_ARG
+						zig build $ZIG_DL_ARG
 						patchShebangs build tests/cli_test
 						bash tests/cli_test
 						'' else ":"}
