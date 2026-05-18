@@ -129,6 +129,16 @@ pub fn build(b: *std.Build) void {
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_lib_tests.step);
 
+	const install_lib_tests = b.addInstallArtifact(lib_tests, .{
+		.dest_dir = .{ .override = .{ .custom = "test-bins" } },
+		.dest_sub_path = "lib_tests",
+	});
+
+	// Builds (but does not run) all test binaries so CI can patchelf the
+	// FHS dynamic-linker path that Zig bakes into libc-linked exes.
+	const test_compile_step = b.step("test-compile", "Compile test binaries without running them");
+	test_compile_step.dependOn(&install_lib_tests.step);
+
 	const bench_mod = b.createModule(.{
 		.root_source_file = b.path("bench/bench_bzip2.zig"),
 		.target = target,
@@ -152,6 +162,10 @@ pub fn build(b: *std.Build) void {
 	});
 	const run_bench_tests = b.addRunArtifact(bench_tests);
 	test_step.dependOn(&run_bench_tests.step);
+	test_compile_step.dependOn(&b.addInstallArtifact(bench_tests, .{
+		.dest_dir = .{ .override = .{ .custom = "test-bins" } },
+		.dest_sub_path = "bench_tests",
+	}).step);
 
 	const fuzz_mod = b.createModule(.{
 		.root_source_file = b.path("fuzz/fuzz_stream_bzip2.zig"),
