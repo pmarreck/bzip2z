@@ -152,7 +152,7 @@ fi
 "$build_cmd" >/dev/null
 
 bin_dir="$root_dir/zig-out/bin"
-cli="$bin_dir/bzip2z"
+cli="${BZIP2Z_CLI:-$bin_dir/bzip2z}"
 
 if [ ! -x "$cli" ]; then
 	echo "bzip2z binary not found at $cli"

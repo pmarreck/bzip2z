@@ -71,18 +71,34 @@
 						cp -r ${zigDeps}/* "$ZIG_GLOBAL_CACHE_DIR/"
 						chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"
 						${if runTests then ''
-						# On Linux, Zig's link_libc bakes /lib64/ld-linux-x86-64.so.2 as
-						# the dynamic linker, which does not exist in the Nix sandbox.
-						# Tell Zig to bake Nix's loader path directly via -Ddynamic-linker
-						# instead of relying on patchelf (which aborts on Zig 0.16 ELFs).
-						ZIG_DL_ARG=""
+						# On Linux, Zig with link_libc bakes /lib64/ld-linux-x86-64.so.2
+						# as the dynamic linker, which doesn't exist in the Nix sandbox.
+						# patchelf 0.18 aborts on Zig 0.16 ELFs and -Ddynamic-linker
+						# breaks shared-lib subcompilation. Instead, compile artifacts
+						# and run each via Nix's loader directly. The CLI gets a thin
+						# shell wrapper so test_cli's $cli invocations work unchanged.
 						${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-						ZIG_DL_ARG="-Ddynamic-linker=$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
+						zig build test-compile
+						zig build
+						DL_PATH="$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
+						rc=0
+						for f in zig-out/test-bins/*; do
+							[ -x "$f" ] || continue
+							"$DL_PATH" "$f" || rc=1
+						done
+						[ $rc -eq 0 ] || { echo "Unit/bench tests failed"; exit 1; }
+						patchShebangs build tests/cli_test
+						mv zig-out/bin/bzip2z zig-out/bin/bzip2z.real
+						printf "%s\n%s\n" "#!${pkgs.runtimeShell}" "exec $DL_PATH \"$PWD/zig-out/bin/bzip2z.real\" \"\$@\"" > zig-out/bin/bzip2z
+						chmod +x zig-out/bin/bzip2z
+						bash tests/cli_test
 						''}
-						zig build test $ZIG_DL_ARG
-						zig build $ZIG_DL_ARG
+						${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) ''
+						zig build test
+						zig build
 						patchShebangs build tests/cli_test
 						bash tests/cli_test
+						''}
 						'' else ":"}
 						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}
 						runHook postBuild
