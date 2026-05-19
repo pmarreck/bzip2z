@@ -89,6 +89,11 @@
 						[ $rc -eq 0 ] || { echo "Unit/bench tests failed"; exit 1; }
 						patchShebangs build tests/cli_test
 						# Wrap all binaries in zig-out/bin via Nix's loader.
+						# --argv0 preserves the original basename (e.g. "bzcatz",
+						# not "bzcatz.real"); cli.c picks compress vs decompress
+						# vs bzcat-to-stdout mode purely from argv[0]'s basename,
+						# so without --argv0 the bzcatz wrapper silently falls
+						# through to compress mode and produces empty stdout.
 						for orig in zig-out/bin/*; do
 							[ -f "$orig" ] || continue
 							[ -x "$orig" ] || continue
@@ -96,7 +101,8 @@
 							mv "$orig" "$orig.real"
 							cat > "$orig" <<WRAPPER
 #!${pkgs.runtimeShell}
-exec "$DL_PATH" "\$(dirname "\$0")/\$(basename "\$0").real" "\$@"
+name="\$(basename "\$0")"
+exec "$DL_PATH" --argv0 "\$name" "\$(dirname "\$0")/\$name.real" "\$@"
 WRAPPER
 							chmod +x "$orig"
 						done
