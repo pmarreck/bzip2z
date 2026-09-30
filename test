@@ -8,4 +8,8 @@ fi
 
 zig build test
 
+# Corrupt-input tests must also run with safety checks on: ReleaseFast wraps
+# integer overflow silently, so only a checked build turns it into a failure.
+zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input"
+
 ./tests/cli_test

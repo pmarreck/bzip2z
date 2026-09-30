@@ -88,6 +88,10 @@ pub const MAX_CODE_LEN: usize = 20;
 /// Minimum Huffman code length
 pub const MIN_CODE_LEN: usize = 1;
 
+/// Upper bound on the RUNA/RUNB positional weight (same limit as reference
+/// bzip2's `N >= 2*1024*1024` data-error check); exceeding it means corrupt input.
+const MAX_RUN_POWER: u32 = 2 * 1024 * 1024;
+
 // ============ Error Types ============
 
 pub const Error = error{
@@ -796,10 +800,13 @@ pub const Decompressor = struct {
 				run_len += (current_sym + 1) * run_power;
 				run_power <<= 1;
 
-				// Continue reading while we get RUNA/RUNB
+				// Continue reading while we get RUNA/RUNB. A chain longer than
+				// MAX_RUN_POWER can only come from corrupt input; rejecting it keeps
+				// run_len < 2^23, so the u32 arithmetic can never overflow.
 				while (true) {
 					current_sym = try decodeNext(self, &group_pos, &selector_idx, bits);
 					if (current_sym >= 2) break;
+					if (run_power >= MAX_RUN_POWER) return Error.CorruptData;
 					run_len += (current_sym + 1) * run_power;
 					run_power <<= 1;
 				}
@@ -4421,4 +4428,70 @@ test "compress round-trip with null bytes in data" {
 
 	try std.testing.expectEqual(data.len, decompressed.len);
 	try std.testing.expectEqualSlices(u8, data, decompressed);
+}
+
+/// Craft a single-block stream whose MTF/RLE2 symbol sequence is `symbols`
+/// (EOB appended), so tests can feed the decoder chains a real encoder never emits.
+fn craftStreamWithSymbols(allocator: Allocator, symbols: []const u16) ![]u8 {
+	var block = try prepareBlock(allocator, "ab");
+	defer block.deinit(allocator);
+
+	const eob: u16 = @intCast(block.num_in_use + 1);
+	const crafted = try allocator.alloc(u16, symbols.len + 1);
+	@memcpy(crafted[0..symbols.len], symbols);
+	crafted[symbols.len] = eob;
+	allocator.free(block.symbols);
+	block.symbols = crafted;
+
+	// Every symbol needs a nonzero code length for a well-formed table.
+	var freqs: [MAX_ALPHA_SIZE]u32 = [_]u32{1} ** MAX_ALPHA_SIZE;
+	for (crafted) |s| freqs[s] += 1;
+	block.lengths = computeHuffmanLengths(&freqs, block.alpha_size, 17);
+	block.codes = buildHuffmanCodes(&block.lengths, block.alpha_size);
+
+	var output: std.ArrayListUnmanaged(u8) = .empty;
+	errdefer output.deinit(allocator);
+	var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+	try writeSingleBlockStream(&aw.writer, 9, &block);
+	output = aw.toArrayList();
+	return output.toOwnedSlice(allocator);
+}
+
+test "corrupt input: over-long RUNB chain is rejected, not overflowed (validate inbox 2026-09-29)" {
+	const allocator = std.testing.allocator;
+	// 40 RUNBs: (1+1) * 2^31 overflows u32 in the naive accumulator.
+	const runbs = [_]u16{1} ** 40;
+	const stream = try craftStreamWithSymbols(allocator, &runbs);
+	defer allocator.free(stream);
+	try std.testing.expectError(Error.CorruptData, decompress(allocator, stream));
+}
+
+test "corrupt input: over-long RUNA chain is rejected (validate inbox 2026-09-29)" {
+	const allocator = std.testing.allocator;
+	// 64 RUNAs: run_power shifts to zero and run_len silently saturates at 2^32-1.
+	const runas = [_]u16{0} ** 64;
+	const stream = try craftStreamWithSymbols(allocator, &runas);
+	defer allocator.free(stream);
+	try std.testing.expectError(Error.CorruptData, decompress(allocator, stream));
+}
+
+test "corrupt input: bit-flip and truncation sweep never panics" {
+	const allocator = std.testing.allocator;
+	var input: [300]u8 = undefined;
+	var prng = std.Random.DefaultPrng.init(0xB21F);
+	for (&input, 0..) |*b, i| b.* = if (i % 7 < 4) 0 else prng.random().int(u8) & 0x0F;
+	const good = try compress(allocator, &input);
+	defer allocator.free(good);
+
+	const mutated = try allocator.dupe(u8, good);
+	defer allocator.free(mutated);
+	var bit: usize = 0;
+	while (bit < good.len * 8) : (bit += 1) {
+		mutated[bit / 8] ^= @as(u8, 1) << @intCast(bit % 8);
+		if (decompress(allocator, mutated)) |out| allocator.free(out) else |_| {}
+		mutated[bit / 8] = good[bit / 8];
+	}
+	for (0..good.len) |len| {
+		if (decompress(allocator, good[0..len])) |out| allocator.free(out) else |_| {}
+	}
 }
