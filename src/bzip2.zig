@@ -108,6 +108,10 @@ pub const Error = error{
 	OutputOverflow,
 	OutOfMemory,
 	InvalidBwtIndex,
+	/// The input reader returned an error other than end-of-stream.
+	ReadFailed,
+	/// The output writer failed.
+	WriteFailed,
 };
 
 pub const CompressOptions = struct {
@@ -246,13 +250,20 @@ pub fn BitReader(comptime ReaderType: type) type {
 		reader: ReaderType,
 		buffer: u64, // Use u64 to handle up to 32 bit reads
 		bits_in_buffer: u6, // u6 can hold 0-63
+		bytes_read: u64,
 
 		pub fn init(reader: ReaderType) Self {
 			return .{
 				.reader = reader,
 				.buffer = 0,
 				.bits_in_buffer = 0,
+				.bytes_read = 0,
 			};
+		}
+
+		/// Absolute input position, in bits, of the next unconsumed bit.
+		pub fn bitPosition(self: *const Self) u64 {
+			return self.bytes_read * 8 - self.bits_in_buffer;
 		}
 
 		/// Read n bits (up to 32) from the stream
@@ -261,8 +272,9 @@ pub fn BitReader(comptime ReaderType: type) type {
 			while (self.bits_in_buffer < n) {
 				const byte = readByteAny(self.reader) catch |err| {
 					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.CorruptData;
+					return Error.ReadFailed;
 				};
+				self.bytes_read += 1;
 				self.buffer = (self.buffer << 8) | byte;
 				self.bits_in_buffer += 8;
 			}
@@ -279,8 +291,9 @@ pub fn BitReader(comptime ReaderType: type) type {
 			while (self.bits_in_buffer < n) {
 				const byte = readByteAny(self.reader) catch |err| {
 					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.CorruptData;
+					return Error.ReadFailed;
 				};
+				self.bytes_read += 1;
 				self.buffer = (self.buffer << 8) | byte;
 				self.bits_in_buffer += 8;
 			}
@@ -308,8 +321,9 @@ pub fn BitReader(comptime ReaderType: type) type {
 			while (self.bits_in_buffer < n) {
 				const byte = readByteAny(self.reader) catch |err| {
 					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.CorruptData;
+					return Error.ReadFailed;
 				};
+				self.bytes_read += 1;
 				self.buffer = (self.buffer << 8) | byte;
 				self.bits_in_buffer += 8;
 			}
@@ -488,6 +502,9 @@ pub const Decompressor = struct {
 	progress_bytes_total: u64 = 0,
 	progress_bytes_processed: u64 = 0,
 
+	// Location/phase of the decode in progress; see Diagnostics.
+	diag: Diagnostics = .{},
+
 	pub fn init(allocator: Allocator) !Decompressor {
 		const block = try allocator.alloc(u8, MAX_BLOCK_SIZE + 1);
 		errdefer allocator.free(block);
@@ -538,9 +555,26 @@ pub const Decompressor = struct {
 	pub fn decompressInternal(self: *Decompressor, reader: anytype, writer: anytype, check_crc: bool) Error!void {
 		const ReaderType = @TypeOf(reader);
 		var bits = BitReader(ReaderType).init(reader);
+		self.diag = .{};
+		self.decodeStreams(ReaderType, &bits, writer, check_crc) catch |err| {
+			self.diag.bit_offset = bits.bitPosition();
+			return err;
+		};
+		self.diag.bit_offset = bits.bitPosition();
+	}
+
+	/// Decode concatenated streams, keeping `self.diag` pointed at the current
+	/// stream, block and phase so a failure can be located afterwards.
+	fn decodeStreams(self: *Decompressor, comptime ReaderType: type, bits: *BitReader(ReaderType), writer: anytype, check_crc: bool) Error!void {
 		var seen_stream = false;
 
 		while (true) {
+			self.diag.phase = .stream_header;
+			self.diag.stream_index = self.diag.streams;
+			self.diag.stream_start_bit = bits.bitPosition();
+			self.diag.block_index = 0;
+			self.diag.block_start_bit = null;
+
 			var header: [4]u8 = undefined;
 			var i: usize = 0;
 			while (i < header.len) : (i += 1) {
@@ -572,20 +606,22 @@ pub const Decompressor = struct {
 
 			// Process blocks until footer
 			while (true) {
+				self.diag.phase = .block_header;
+				self.diag.block_start_bit = bits.bitPosition();
+
 				// Read 48-bit block/footer magic
 				const magic_high: u48 = try bits.readBits(24);
 				const magic_low: u48 = try bits.readBits(24);
 				const magic: u48 = (magic_high << 24) | magic_low;
 
 				if (magic == FOOTER_MAGIC) {
-					// Stream footer - read and verify CRC
-					if (check_crc) {
-						const stored_stream_crc = try bits.readBits(32);
-						if (stored_stream_crc != self.stream_crc) {
-							return Error.StreamCrcMismatch;
-						}
-					} else {
-						_ = try bits.readBits(32); // Skip CRC
+					self.diag.phase = .stream_footer;
+					self.diag.block_start_bit = null;
+					const stored_stream_crc = try bits.readBits(32);
+					if (check_crc and stored_stream_crc != self.stream_crc) {
+						self.diag.stored_crc = stored_stream_crc;
+						self.diag.computed_crc = self.stream_crc;
+						return Error.StreamCrcMismatch;
 					}
 					break;
 				}
@@ -595,11 +631,11 @@ pub const Decompressor = struct {
 				}
 
 				// Process block
-				try self.readBlock(ReaderType, &bits);
+				try self.readBlock(ReaderType, bits);
 				try self.decodeBlockInternal(check_crc);
 
 				// Write decompressed output
-				_ = writer.write(self.output[0..self.output_len]) catch return Error.CorruptData;
+				writer.writeAll(self.output[0..self.output_len]) catch return Error.WriteFailed;
 
 				// Fire progress callback
 				self.progress_bytes_processed += self.output_len;
@@ -609,9 +645,14 @@ pub const Decompressor = struct {
 
 				// Update stream CRC (rotate left by 1 and XOR with block CRC)
 				self.stream_crc = ((self.stream_crc << 1) | (self.stream_crc >> 31)) ^ self.stored_block_crc;
+				self.diag.blocks += 1;
+				self.diag.block_index += 1;
+				self.diag.window_start_bit = self.diag.block_start_bit.?;
 			}
 
+			self.diag.streams += 1;
 			bits.alignToByte();
+			self.diag.window_start_bit = bits.bitPosition();
 		}
 	}
 
@@ -626,7 +667,10 @@ pub const Decompressor = struct {
 		self.bwt_primary_index = try bits.readBits(24);
 
 		// Read symbol bitmap
+		self.diag.phase = .symbol_map;
 		try self.readSymbolMap(ReaderType, bits);
+
+		self.diag.phase = .selectors;
 
 		// Number of Huffman groups (3 bits)
 		self.num_groups = try bits.readBits(3);
@@ -644,9 +688,11 @@ pub const Decompressor = struct {
 		try self.readSelectors(ReaderType, bits);
 
 		// Read Huffman code lengths and build tables
+		self.diag.phase = .huffman_tables;
 		try self.readHuffmanTrees(ReaderType, bits);
 
 		// Decode compressed data
+		self.diag.phase = .symbol_data;
 		try self.readCompressedData(ReaderType, bits);
 	}
 
@@ -868,6 +914,7 @@ pub const Decompressor = struct {
 	}
 
 	fn decodeBlockInternal(self: *Decompressor, check_crc: bool) Error!void {
+		self.diag.phase = .block_reconstruct;
 		if (self.block_size == 0) {
 			self.output_len = 0;
 			return;
@@ -883,10 +930,14 @@ pub const Decompressor = struct {
 		try self.expandInitialRle();
 
 		// Verify block CRC
+		self.diag.phase = .block_crc;
 		if (check_crc) {
 			var crc = Crc32Bzip2.init();
 			crc.updateSlice(self.output[0..self.output_len]);
-			if (crc.final() != self.stored_block_crc) {
+			const computed = crc.final();
+			if (computed != self.stored_block_crc) {
+				self.diag.stored_crc = self.stored_block_crc;
+				self.diag.computed_crc = computed;
 				return Error.BlockCrcMismatch;
 			}
 		}
@@ -2950,6 +3001,80 @@ fn decompressInternalWithOptions(allocator: Allocator, input: []const u8, check_
 	return output_list.toOwnedSlice(allocator);
 }
 
+/// Where and why decoding failed, filled by `decompressStream` on error.
+/// bzip2 is bit-packed, so positions are absolute bit offsets from the start of
+/// the input. `bit_offset` is where the problem was *detected*: just past the
+/// offending field or Huffman symbol. A flipped bit inside Huffman-coded data
+/// usually decodes as a different valid symbol, so detection can land far past
+/// the corruption; `block_start_bit` is the reliable localization in that case,
+/// and a CRC mismatch can only ever be pinned to its block or stream.
+pub const Diagnostics = struct {
+	pub const Phase = enum {
+		stream_header,
+		block_header,
+		symbol_map,
+		selectors,
+		huffman_tables,
+		symbol_data,
+		block_reconstruct,
+		block_crc,
+		stream_footer,
+	};
+
+	phase: Phase = .stream_header,
+	/// Input bits consumed when the error was detected.
+	bit_offset: u64 = 0,
+	/// Zero-based index of the concatenated stream being decoded.
+	stream_index: u32 = 0,
+	stream_start_bit: u64 = 0,
+	/// Zero-based block index within the current stream. In the
+	/// stream_footer phase this equals the number of blocks in the stream.
+	block_index: u32 = 0,
+	/// Bit offset of the current block's 48-bit magic; null outside a block.
+	block_start_bit: ?u64 = null,
+	/// The corruption behind the error lies in [window_start_bit, bit_offset).
+	/// This is the start of the most recent CRC-verified block in the current
+	/// stream (else the stream start). It is not that block's end: a CRC covers
+	/// decoded bytes, not bit layout, so a flip can leave a block's output intact
+	/// yet change its length and break the framing of what follows. Unlike
+	/// block_start_bit, the window holds when framing is desynchronized.
+	window_start_bit: u64 = 0,
+	/// Set for BlockCrcMismatch / StreamCrcMismatch.
+	stored_crc: ?u32 = null,
+	computed_crc: ?u32 = null,
+	/// Streams and blocks fully decoded and verified (also set on success).
+	streams: u32 = 0,
+	blocks: u32 = 0,
+
+	pub fn byteOffset(self: Diagnostics) u64 {
+		return self.bit_offset / 8;
+	}
+
+	/// Bit within `byteOffset()`, counted from the most significant bit
+	/// (bzip2 packs bits MSB-first), so 0 is the 0x80 bit.
+	pub fn bitInByte(self: Diagnostics) u3 {
+		return @intCast(self.bit_offset % 8);
+	}
+};
+
+pub const StreamOptions = struct {
+	diagnostics: ?*Diagnostics = null,
+};
+
+/// Streaming decode/verify: pulls compressed bytes from any reader (a
+/// `*std.Io.Reader` or anything with `read`), writes decoded bytes to any
+/// writer with `writeAll` (use `std.Io.Writer.Discarding` to verify only).
+/// Checks every block CRC and each stream CRC across concatenated streams;
+/// memory is the decoder's per-block working state, independent of stream length.
+pub fn decompressStream(allocator: Allocator, reader: anytype, writer: anytype, options: StreamOptions) Error!void {
+	var decompressor = try Decompressor.init(allocator);
+	defer decompressor.deinit();
+	defer if (options.diagnostics) |d| {
+		d.* = decompressor.diag;
+	};
+	try decompressor.decompress(reader, writer);
+}
+
 /// Decompress a file to a writer, optionally using parallel multi-stream decode.
 pub fn decompressFileToWriterWithOptions(
 	allocator: Allocator,
@@ -4494,4 +4619,355 @@ test "corrupt input: bit-flip and truncation sweep never panics" {
 	for (0..good.len) |len| {
 		if (decompress(allocator, good[0..len])) |out| allocator.free(out) else |_| {}
 	}
+}
+
+// ============ decompressStream + Diagnostics tests ============
+
+/// Test allocator wrapper that records peak live bytes, so tests can prove
+/// decoder memory is bounded by block size rather than by stream length.
+const PeakAllocator = struct {
+	child: Allocator,
+	live: usize = 0,
+	peak: usize = 0,
+
+	fn allocator(self: *PeakAllocator) Allocator {
+		return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+	}
+	fn grow(self: *PeakAllocator, old: usize, new: usize) void {
+		self.live = self.live - old + new;
+		self.peak = @max(self.peak, self.live);
+	}
+	fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+		const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+		const p = self.child.rawAlloc(len, a, ra) orelse return null;
+		self.grow(0, len);
+		return p;
+	}
+	fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) bool {
+		const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+		if (!self.child.rawResize(m, a, n, ra)) return false;
+		self.grow(m.len, n);
+		return true;
+	}
+	fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) ?[*]u8 {
+		const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+		const p = self.child.rawRemap(m, a, n, ra) orelse return null;
+		self.grow(m.len, n);
+		return p;
+	}
+	fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+		const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+		self.child.rawFree(m, a, ra);
+		self.grow(m.len, 0);
+	}
+};
+
+/// Unbuffered writer that accepts one byte per drain call, forcing every
+/// short-write path a real pipe or socket can produce.
+const TrickleWriter = struct {
+	list: std.ArrayListUnmanaged(u8) = .empty,
+	allocator: Allocator,
+	writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+
+	fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+		const self: *TrickleWriter = @fieldParentPtr("writer", w);
+		for (data, 0..) |chunk, i| {
+			const is_last = i == data.len - 1;
+			if (chunk.len == 0 or (is_last and splat == 0)) continue;
+			self.list.append(self.allocator, chunk[0]) catch return error.WriteFailed;
+			return 1;
+		}
+		return 0;
+	}
+};
+
+const FailingWriter = struct {
+	writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+	fn drain(_: *std.Io.Writer, _: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+		return error.WriteFailed;
+	}
+};
+
+/// Minimal `read`-style reader (the shape validate's FileSource exposes) that
+/// fails after `ok_bytes`, standing in for an I/O error mid-stream.
+const FailingReader = struct {
+	data: []const u8,
+	pos: usize = 0,
+	ok_bytes: usize,
+	pub fn read(self: *FailingReader, dest: []u8) error{InputOutput}!usize {
+		if (self.pos >= self.ok_bytes) return error.InputOutput;
+		const n = @min(dest.len, self.ok_bytes - self.pos, self.data.len - self.pos);
+		@memcpy(dest[0..n], self.data[self.pos..][0..n]);
+		self.pos += n;
+		return n;
+	}
+};
+
+fn testPayload(allocator: Allocator, len: usize, seed: u64) ![]u8 {
+	const buf = try allocator.alloc(u8, len);
+	var prng = std.Random.DefaultPrng.init(seed);
+	// Mix of runs and noise so blocks exercise RUNA/RUNB, MTF and initial RLE.
+	for (buf, 0..) |*b, i| b.* = if (i % 13 < 6) 'x' else prng.random().int(u8) % 40 + 'A';
+	return buf;
+}
+
+/// Bit offset of the first 48-bit FOOTER_MAGIC at or after `from_bit`.
+fn findFooterBit(data: []const u8, from_bit: u64) ?u64 {
+	var bit = from_bit;
+	while (bit + 48 <= @as(u64, data.len) * 8) : (bit += 1) {
+		var v: u48 = 0;
+		for (0..48) |k| {
+			const p = bit + k;
+			v = (v << 1) | @as(u48, (data[p / 8] >> @intCast(7 - p % 8)) & 1);
+		}
+		if (v == FOOTER_MAGIC) return bit;
+	}
+	return null;
+}
+
+fn flipBit(data: []u8, bit: u64) void {
+	data[bit / 8] ^= @as(u8, 0x80) >> @intCast(bit % 8);
+}
+
+test "decompressStream: concatenated multi-block streams round-trip to a writer" {
+	const allocator = std.testing.allocator;
+	const a = try testPayload(allocator, 250_000, 1);
+	defer allocator.free(a);
+	const b = try testPayload(allocator, 1_000, 2);
+	defer allocator.free(b);
+	const sa = try compressWithOptions(allocator, a, .{ .level = 1 });
+	defer allocator.free(sa);
+	const sb = try compress(allocator, b);
+	defer allocator.free(sb);
+	const both = try std.mem.concat(allocator, u8, &.{ sa, sb });
+	defer allocator.free(both);
+
+	var reader: std.Io.Reader = .fixed(both);
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	var diag: Diagnostics = .{};
+	try decompressStream(allocator, &reader, &out.writer, .{ .diagnostics = &diag });
+
+	const expected = try std.mem.concat(allocator, u8, &.{ a, b });
+	defer allocator.free(expected);
+	try std.testing.expectEqualSlices(u8, expected, out.written());
+	try std.testing.expectEqual(@as(u32, 2), diag.streams);
+	try std.testing.expectEqual(@as(u32, 4), diag.blocks);
+}
+
+test "decompressStream: short writes lose no bytes" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 5_000, 3);
+	defer allocator.free(data);
+	const stream = try compress(allocator, data);
+	defer allocator.free(stream);
+
+	var reader: std.Io.Reader = .fixed(stream);
+	var sink: TrickleWriter = .{ .allocator = allocator };
+	defer sink.list.deinit(allocator);
+	try decompressStream(allocator, &reader, &sink.writer, .{});
+	try std.testing.expectEqualSlices(u8, data, sink.list.items);
+}
+
+test "decompressStream: memory is bounded by block size, not stream count (discard sink)" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 150_000, 4);
+	defer allocator.free(data);
+	const one = try compressWithOptions(allocator, data, .{ .level = 1 });
+	defer allocator.free(one);
+	const eight = try std.mem.concat(allocator, u8, &.{ one, one, one, one, one, one, one, one });
+	defer allocator.free(eight);
+
+	var peaks: [2]usize = undefined;
+	for ([_][]const u8{ one, eight }, 0..) |input, i| {
+		var peak: PeakAllocator = .{ .child = allocator };
+		var reader: std.Io.Reader = .fixed(input);
+		var discard_buf: [4096]u8 = undefined;
+		var discard: std.Io.Writer.Discarding = .init(&discard_buf);
+		try decompressStream(peak.allocator(), &reader, &discard.writer, .{});
+		try std.testing.expectEqual(@as(u64, data.len) * (1 + 7 * i), discard.fullCount());
+		try std.testing.expectEqual(@as(usize, 0), peak.live);
+		peaks[i] = peak.peak;
+	}
+	// Metamorphic: 8x the decoded output must not raise peak memory at all.
+	try std.testing.expectEqual(peaks[0], peaks[1]);
+}
+
+test "diagnostics: corrupted stored block CRC reports block location and both CRCs" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 2_000, 5);
+	defer allocator.free(data);
+	const good = try compress(allocator, data);
+	defer allocator.free(good);
+	const first = try compress(allocator, "first stream");
+	defer allocator.free(first);
+	// Stream 1 = `first`; corrupt the stored CRC of stream 1's first block.
+	const input = try std.mem.concat(allocator, u8, &.{ first, good });
+	defer allocator.free(input);
+	const stream_bit: u64 = @as(u64, first.len) * 8;
+	// Stored block CRC sits right after "BZh9" (32 bits) and the 48-bit block magic.
+	flipBit(input, stream_bit + 32 + 48 + 3);
+
+	var reader: std.Io.Reader = .fixed(input);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.BlockCrcMismatch, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(Diagnostics.Phase.block_crc, diag.phase);
+	try std.testing.expectEqual(@as(u32, 1), diag.stream_index);
+	try std.testing.expectEqual(@as(u32, 0), diag.block_index);
+	try std.testing.expectEqual(stream_bit, diag.stream_start_bit);
+	try std.testing.expectEqual(@as(?u64, stream_bit + 32), diag.block_start_bit);
+	try std.testing.expect(diag.stored_crc.? != diag.computed_crc.?);
+	try std.testing.expect(diag.bit_offset > stream_bit + 32);
+}
+
+test "diagnostics: corrupted stream CRC reports stream_footer phase" {
+	const allocator = std.testing.allocator;
+	const stream = try compress(allocator, "hello hello hello diagnostics");
+	defer allocator.free(stream);
+	const input = try allocator.dupe(u8, stream);
+	defer allocator.free(input);
+	const footer = findFooterBit(input, 32).?;
+	flipBit(input, footer + 48 + 7);
+
+	var reader: std.Io.Reader = .fixed(input);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.StreamCrcMismatch, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(Diagnostics.Phase.stream_footer, diag.phase);
+	try std.testing.expectEqual(@as(?u64, null), diag.block_start_bit);
+	try std.testing.expectEqual(footer + 48 + 32, diag.bit_offset);
+	try std.testing.expectEqual(@as(u64, (footer + 80) / 8), diag.byteOffset());
+	try std.testing.expectEqual(@as(u3, @intCast((footer + 80) % 8)), diag.bitInByte());
+	try std.testing.expect(diag.stored_crc.? != diag.computed_crc.?);
+}
+
+test "diagnostics: over-long RUNB chain is located in symbol_data of block 0" {
+	const allocator = std.testing.allocator;
+	const runbs = [_]u16{1} ** 40;
+	const stream = try craftStreamWithSymbols(allocator, &runbs);
+	defer allocator.free(stream);
+
+	var reader: std.Io.Reader = .fixed(stream);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.CorruptData, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(Diagnostics.Phase.symbol_data, diag.phase);
+	try std.testing.expectEqual(@as(?u64, 32), diag.block_start_bit);
+	try std.testing.expect(diag.bit_offset > 32 + 48);
+	try std.testing.expect(diag.bit_offset <= @as(u64, stream.len) * 8);
+}
+
+test "diagnostics: bad magic on second stream points at that stream" {
+	const allocator = std.testing.allocator;
+	const s = try compress(allocator, "abc");
+	defer allocator.free(s);
+	const input = try std.mem.concat(allocator, u8, &.{ s, "BZx9garbage" });
+	defer allocator.free(input);
+
+	var reader: std.Io.Reader = .fixed(input);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.InvalidMagic, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(Diagnostics.Phase.stream_header, diag.phase);
+	try std.testing.expectEqual(@as(u32, 1), diag.stream_index);
+	try std.testing.expectEqual(@as(u64, s.len) * 8, diag.stream_start_bit);
+	try std.testing.expectEqual(@as(u64, s.len + 4) * 8, diag.bit_offset);
+}
+
+test "diagnostics: truncation reports UnexpectedEof at end of input" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 3_000, 6);
+	defer allocator.free(data);
+	const stream = try compress(allocator, data);
+	defer allocator.free(stream);
+	const cut = stream.len / 2;
+
+	var reader: std.Io.Reader = .fixed(stream[0..cut]);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.UnexpectedEof, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(@as(?u64, 32), diag.block_start_bit);
+	try std.testing.expect(diag.bit_offset <= @as(u64, cut) * 8);
+	try std.testing.expect(diag.bit_offset > @as(u64, cut) * 8 - 64);
+}
+
+test "decompressStream: reader and writer failures are I/O errors, not CorruptData" {
+	const allocator = std.testing.allocator;
+	const stream = try compress(allocator, "some data some data some data");
+	defer allocator.free(stream);
+
+	var bad_reader: FailingReader = .{ .data = stream, .ok_bytes = 10 };
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.ReadFailed, decompressStream(allocator, &bad_reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(@as(u64, 10 * 8), diag.bit_offset);
+
+	var reader: std.Io.Reader = .fixed(stream);
+	var bad_writer: FailingWriter = .{};
+	try std.testing.expectError(Error.WriteFailed, decompressStream(allocator, &reader, &bad_writer.writer, .{}));
+}
+
+test "decompressStream: works with a plain read()-style reader (FileSource shape)" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 4_000, 7);
+	defer allocator.free(data);
+	const stream = try compress(allocator, data);
+	defer allocator.free(stream);
+
+	// ok_bytes past the end: the reader never fails and reports EOF as 0 bytes.
+	var src: FailingReader = .{ .data = stream, .ok_bytes = std.math.maxInt(usize) };
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	try decompressStream(allocator, &src, &out.writer, .{});
+	try std.testing.expectEqualSlices(u8, data, out.written());
+}
+
+test "diagnostics: every single-bit flip lies inside [window_start_bit, bit_offset)" {
+	// Oracle independent of the decoder: we know exactly which bit we flipped.
+	// A sequential decoder cannot detect a flip before reading it, and any
+	// block whose CRC verified cannot contain it, so the reported window must
+	// bracket the flip for every position, across blocks and streams.
+	const allocator = std.testing.allocator;
+	const big = try allocator.alloc(u8, 101_000); // two level-1 blocks
+	defer allocator.free(big);
+	for (big, 0..) |*b, i| b.* = @truncate((i * 7) % 251 + (i / 5000));
+	const multi_block = try compressWithOptions(allocator, big, .{ .level = 1 });
+	defer allocator.free(multi_block);
+	const small = try compress(allocator, "a second, much smaller stream");
+	defer allocator.free(small);
+	const good = try std.mem.concat(allocator, u8, &.{ small, multi_block, small });
+	defer allocator.free(good);
+
+	const input = try allocator.dupe(u8, good);
+	defer allocator.free(input);
+	// Exhaustive over the small streams; stride 7 (coprime with 8, so every
+	// bit-in-byte position is hit) across the costlier multi-block stream.
+	const multi_start: u64 = @as(u64, small.len) * 8;
+	const multi_end: u64 = multi_start + @as(u64, multi_block.len) * 8;
+	var errors_seen: usize = 0;
+	var flips: usize = 0;
+	var bit: u64 = 0;
+	while (bit < @as(u64, good.len) * 8) : (bit += if (bit >= multi_start and bit < multi_end) 7 else 1) {
+		flips += 1;
+		flipBit(input, bit);
+		defer flipBit(input, bit);
+		var reader: std.Io.Reader = .fixed(input);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }) catch {
+			errors_seen += 1;
+			// Tightness: every stream before the flipped one verified in full.
+			const s2: u64 = @as(u64, small.len) * 8;
+			const s3: u64 = s2 + @as(u64, multi_block.len) * 8;
+			const containing_stream_start: u64 = if (bit >= s3) s3 else if (bit >= s2) s2 else 0;
+			if (!(containing_stream_start <= diag.window_start_bit and diag.window_start_bit <= bit and bit < diag.bit_offset)) {
+				std.debug.print("flip {d}: window [{d}, {d}) phase {t}\n", .{ bit, diag.window_start_bit, diag.bit_offset, diag.phase });
+				return error.TestExpectedWindow;
+			}
+			continue;
+		};
+	}
+	// Sanity: nearly every flip must be detected (padding/level-digit flips may not be).
+	try std.testing.expect(errors_seen * 100 >= flips * 95);
 }

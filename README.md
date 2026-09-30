@@ -346,6 +346,35 @@ pub fn main() !void {
 }
 ```
 
+### Streaming decode and corruption diagnostics
+
+`decompressStream` pulls from any reader (`*std.Io.Reader`, or anything with a
+`read` method) and writes to any writer with `writeAll`. It checks every block
+CRC and every stream CRC across concatenated streams. Memory is the decoder's
+per-block working state, independent of how long the input is. To verify
+without keeping output, write to `std.Io.Writer.Discarding`.
+
+```zig
+var reader: std.Io.Reader = .fixed(compressed); // or a file reader
+var discard: std.Io.Writer.Discarding = .init(&.{});
+var diag: bzip2.Diagnostics = .{};
+bzip2.decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }) catch |err| {
+	std.debug.print("{t} in stream {d} block {d} ({t}) at byte {d} bit {d}; corruption in bits [{d}, {d})\n", .{
+		err, diag.stream_index, diag.block_index, diag.phase,
+		diag.byteOffset(), diag.bitInByte(), diag.window_start_bit, diag.bit_offset,
+	});
+};
+```
+
+Positions are absolute **bit** offsets, since bzip2 blocks are not byte-aligned;
+`bitInByte()` counts from the most significant bit (0 is the 0x80 bit).
+`bit_offset` is where the error was *detected*, just past the offending field or
+Huffman symbol. A flipped bit in Huffman-coded data usually decodes as another
+valid symbol, so detection can land well past the damage. `block_start_bit` names
+the block being decoded. `[window_start_bit, bit_offset)` is the guaranteed
+bracket: it starts at the last CRC-verified block, because a CRC covers decoded
+bytes, not bit layout. `stored_crc`/`computed_crc` are set on CRC mismatches.
+
 ## CLI usage
 
 ```
