@@ -9,3 +9,5 @@
 - [x] Add GitHub Actions CI matrix for the same 5 targets and publish downloadable artifacts. (completed 2026-02-22 13:25 EST)
 - [x] Add README badges for Garnix and GitHub CI; update `CODE_MINIMAP.md` for new architecture files. (completed 2026-02-22 13:25 EST)
 - [x] Re-run `./test`, run feasible flake/workflow sanity checks, then commit and push on `yolo`. (completed 2026-02-22 13:25 EST)
+- [x] Reject over-long RUNA/RUNB chains as CorruptData (validate inbox 2026-09-29); wired bzip2.zig/core.zig inline tests into test root; ReleaseSafe corrupt-input pass in ./test. Replied to validate with 9d7a049 + package hash. (completed 2026-09-29 21:05 EDT)
+- [ ] Streaming bzip2 verification API: generic reader -> writer/discard sink, bounded allocations, all block + combined CRCs incl. concatenated streams (inbox/2026-07-10-from-validate-archive-streaming-streaming-verifier.md; reply to validate-archive-streaming).
