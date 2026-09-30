@@ -16,3 +16,4 @@
 - [ ] A block that decodes to zero symbols skips the BWT-index and CRC checks (`decodeBlockInternal` returns early); reference bzip2 rejects origPtr >= nblock there. Add a failing test, then reject.
 - [ ] BitReader pulls one byte per `read` call; unbuffered `read`-style sources (validate FileSource) pay a call per byte. Consider an internal refill buffer, measured with hyperfine.
 - [ ] Optional: surface Diagnostics through the C FFI and the CLI's decompression error message.
+- [ ] Mutation vocabulary v2 (Einstein 2026-09-29; `~/MEMORIES/Corruption mutation vocabulary uses sniper bolter shotgun and nuke.frontmatter.md`): no prior shotgun/nuke uses here. Name the exhaustive single-bit Diagnostics sweep "sniper"; add a seeded shotgun sweep (8..16 distinct bits in a fully contained 32-byte window, recording seed/offset/bits) asserting no panic and at least one flipped bit in [window_start_bit, bit_offset). Count crashes separately from rejections.
