@@ -469,6 +469,9 @@ pub const Decompressor = struct {
 	// Block data buffer
 	block: []u8,
 	block_size: usize,
+	// Symbol limit for blocks in the current stream (header digit * 100000),
+	// matching reference bzip2's nblock < 100000 * level data-error check.
+	block_cap: usize = MAX_BLOCK_SIZE,
 	stored_block_crc: u32,
 
 	// BWT state
@@ -580,7 +583,9 @@ pub const Decompressor = struct {
 			while (i < header.len) : (i += 1) {
 				const byte_val = bits.readBits(8) catch |err| {
 					if (err == Error.UnexpectedEof) {
-						if (!seen_stream) return Error.UnexpectedEof;
+						// A clean end is EOF exactly between streams; a partial
+						// next header is trailing garbage the caller must see.
+						if (!seen_stream or i > 0) return Error.UnexpectedEof;
 						return;
 					}
 					return err;
@@ -600,6 +605,7 @@ pub const Decompressor = struct {
 			if (level < '1' or level > '9') {
 				return Error.InvalidBlockSize;
 			}
+			self.block_cap = @as(usize, level - '0') * BLOCK_SIZE_UNIT;
 
 			// Reset stream CRC
 			self.stream_crc = 0;
@@ -632,13 +638,10 @@ pub const Decompressor = struct {
 
 				// Process block
 				try self.readBlock(ReaderType, bits);
-				try self.decodeBlockInternal(check_crc);
-
-				// Write decompressed output
-				writer.writeAll(self.output[0..self.output_len]) catch return Error.WriteFailed;
+				const emitted = try self.decodeBlockInternal(check_crc, writer);
 
 				// Fire progress callback
-				self.progress_bytes_processed += self.output_len;
+				self.progress_bytes_processed += emitted;
 				if (self.on_progress) |cb| {
 					cb(self.progress_bytes_processed, self.progress_bytes_total, self.progress_userdata);
 				}
@@ -860,7 +863,7 @@ pub const Decompressor = struct {
 				// Output run of MTF[0]
 				const byte = self.seq_to_unseq[mtf[0]];
 				for (0..run_len) |_| {
-					if (self.block_size >= MAX_BLOCK_SIZE) {
+					if (self.block_size >= self.block_cap) {
 						return Error.OutputOverflow;
 					}
 					self.block[self.block_size] = byte;
@@ -883,7 +886,7 @@ pub const Decompressor = struct {
 					std.mem.copyBackwards(u8, mtf[1..@as(usize, idx) + 1], mtf[0..idx]);
 					mtf[0] = out_byte;
 
-					if (self.block_size >= MAX_BLOCK_SIZE) {
+					if (self.block_size >= self.block_cap) {
 						return Error.OutputOverflow;
 					}
 					self.block[self.block_size] = self.seq_to_unseq[out_byte];
@@ -900,7 +903,7 @@ pub const Decompressor = struct {
 				std.mem.copyBackwards(u8, mtf[1..@as(usize, idx) + 1], mtf[0..idx]);
 				mtf[0] = out_byte;
 
-				if (self.block_size >= MAX_BLOCK_SIZE) {
+				if (self.block_size >= self.block_cap) {
 					return Error.OutputOverflow;
 				}
 				self.block[self.block_size] = self.seq_to_unseq[out_byte];
@@ -909,16 +912,12 @@ pub const Decompressor = struct {
 		}
 	}
 
-	fn decodeBlock(self: *Decompressor) Error!void {
-		return self.decodeBlockInternal(true);
-	}
-
-	fn decodeBlockInternal(self: *Decompressor, check_crc: bool) Error!void {
+	/// Reconstruct the block (inverse BWT, then initial-RLE expansion), stream
+	/// its bytes to `writer` and verify the block CRC. Returns the byte count.
+	/// Output is written before the CRC can be checked, as in reference bzip2.
+	fn decodeBlockInternal(self: *Decompressor, check_crc: bool, writer: anytype) Error!u64 {
 		self.diag.phase = .block_reconstruct;
-		if (self.block_size == 0) {
-			self.output_len = 0;
-			return;
-		}
+		if (self.block_size == 0) return 0;
 
 		// Build inverse BWT transformation
 		try self.buildInverseBwt();
@@ -927,13 +926,12 @@ pub const Decompressor = struct {
 		try self.inverseBwt();
 
 		// Expand initial RLE (runs of 4+ identical bytes were compressed)
-		try self.expandInitialRle();
+		var crc = Crc32Bzip2.init();
+		const emitted = try self.emitInitialRle(writer, &crc);
 
 		// Verify block CRC
 		self.diag.phase = .block_crc;
 		if (check_crc) {
-			var crc = Crc32Bzip2.init();
-			crc.updateSlice(self.output[0..self.output_len]);
 			const computed = crc.final();
 			if (computed != self.stored_block_crc) {
 				self.diag.stored_crc = self.stored_block_crc;
@@ -941,92 +939,51 @@ pub const Decompressor = struct {
 				return Error.BlockCrcMismatch;
 			}
 		}
+		return emitted;
 	}
 
-	fn expandInitialRle(self: *Decompressor) Error!void {
-		// bzip2's initial RLE: runs of 4+ identical bytes are encoded as
-		// XXXX + count, where count (0-255) indicates additional copies beyond 4.
-		// We expand these runs using the block buffer as scratch space.
-		//
-		// The compressor limits blocks by RLE-ENCODED size, so the expanded
-		// output can exceed MAX_BLOCK_SIZE. We compute the needed size first
-		// and grow buffers if necessary.
+	/// Expand bzip2's initial RLE (four equal bytes, then a count byte of 0-255
+	/// further copies) from `self.output` straight to `writer`. Bytes are staged
+	/// in `self.block`, which is free once the inverse BWT has run, and fed to
+	/// the block CRC per chunk, so memory stays fixed however far runs expand
+	/// (one 900k block of runs can expand to ~46 MB).
+	fn emitInitialRle(self: *Decompressor, writer: anytype, crc: *Crc32Bzip2) Error!u64 {
+		const input = self.output[0..self.output_len];
+		const scratch = self.block;
+		var fill: usize = 0;
+		var emitted: u64 = 0;
 
-		// First pass: compute expanded size
-		const needed = self.computeRleExpandedSize() orelse return Error.CorruptData;
-
-		// Grow buffers if expansion exceeds current capacity
-		if (needed > self.block.len) {
-			self.block = self.allocator.realloc(self.block, needed) catch return Error.OutOfMemory;
-		}
-		if (needed > self.output.len) {
-			self.output = self.allocator.realloc(self.output, needed) catch return Error.OutOfMemory;
-		}
-
-		// Second pass: expand
 		var read_pos: usize = 0;
-		var write_pos: usize = 0;
-
-		while (read_pos < self.output_len) {
-			const byte = self.output[read_pos];
+		while (read_pos < input.len) {
+			const byte = input[read_pos];
 			read_pos += 1;
 
-			// Check for a run of 4 identical bytes
-			if (read_pos + 3 <= self.output_len and
-				self.output[read_pos] == byte and
-				self.output[read_pos + 1] == byte and
-				self.output[read_pos + 2] == byte)
+			var count: usize = 1;
+			if (read_pos + 3 <= input.len and
+				input[read_pos] == byte and
+				input[read_pos + 1] == byte and
+				input[read_pos + 2] == byte)
 			{
 				read_pos += 3; // Skip the 3 additional copies (total 4)
-
-				if (read_pos >= self.output_len) {
-					return Error.CorruptData;
-				}
-				const count = self.output[read_pos];
+				if (read_pos >= input.len) return Error.CorruptData;
+				count = 4 + @as(usize, input[read_pos]);
 				read_pos += 1;
-
-				const total = @as(usize, 4) + @as(usize, count);
-				for (0..total) |_| {
-					self.block[write_pos] = byte;
-					write_pos += 1;
-				}
-			} else {
-				self.block[write_pos] = byte;
-				write_pos += 1;
 			}
+
+			// A run is at most 259 bytes, far below the scratch size.
+			if (fill + count > scratch.len) {
+				crc.updateSlice(scratch[0..fill]);
+				writer.writeAll(scratch[0..fill]) catch return Error.WriteFailed;
+				emitted += fill;
+				fill = 0;
+			}
+			@memset(scratch[fill..][0..count], byte);
+			fill += count;
 		}
 
-		// Copy expanded data back to output
-		@memcpy(self.output[0..write_pos], self.block[0..write_pos]);
-		self.output_len = write_pos;
-	}
-
-	/// Compute the expanded size of RLE data in self.output without modifying anything.
-	/// Returns null if the RLE data is malformed (missing count byte).
-	fn computeRleExpandedSize(self: *const Decompressor) ?usize {
-		var read_pos: usize = 0;
-		var expanded: usize = 0;
-
-		while (read_pos < self.output_len) {
-			const byte = self.output[read_pos];
-			read_pos += 1;
-
-			if (read_pos + 3 <= self.output_len and
-				self.output[read_pos] == byte and
-				self.output[read_pos + 1] == byte and
-				self.output[read_pos + 2] == byte)
-			{
-				read_pos += 3;
-				if (read_pos >= self.output_len) return null;
-				const count = self.output[read_pos];
-				read_pos += 1;
-				expanded += @as(usize, 4) + @as(usize, count);
-			} else {
-				expanded += 1;
-			}
-		}
-
-		return expanded;
+		crc.updateSlice(scratch[0..fill]);
+		writer.writeAll(scratch[0..fill]) catch return Error.WriteFailed;
+		return emitted + fill;
 	}
 
 	fn buildInverseBwt(self: *Decompressor) Error!void {
@@ -3872,10 +3829,14 @@ test "initial RLE expansion - known patterns" {
 	decompressor.output[4] = 6; // 6 more copies
 	decompressor.output_len = 5;
 
-	try decompressor.expandInitialRle();
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	var crc = Crc32Bzip2.init();
+	_ = try decompressor.emitInitialRle(&out.writer, &crc);
+	const expanded = out.written();
 
-	try std.testing.expectEqual(@as(usize, 10), decompressor.output_len);
-	for (decompressor.output[0..10]) |byte| {
+	try std.testing.expectEqual(@as(usize, 10), expanded.len);
+	for (expanded[0..10]) |byte| {
 		try std.testing.expectEqual(@as(u8, 'A'), byte);
 	}
 }
@@ -3892,10 +3853,14 @@ test "initial RLE expansion - no runs" {
 	decompressor.output[2] = 'C';
 	decompressor.output_len = 3;
 
-	try decompressor.expandInitialRle();
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	var crc = Crc32Bzip2.init();
+	_ = try decompressor.emitInitialRle(&out.writer, &crc);
+	const expanded = out.written();
 
-	try std.testing.expectEqual(@as(usize, 3), decompressor.output_len);
-	try std.testing.expectEqualSlices(u8, "ABC", decompressor.output[0..3]);
+	try std.testing.expectEqual(@as(usize, 3), expanded.len);
+	try std.testing.expectEqualSlices(u8, "ABC", expanded[0..3]);
 }
 
 test "initial RLE expansion - mixed content" {
@@ -3915,10 +3880,29 @@ test "initial RLE expansion - mixed content" {
 	decompressor.output[7] = 'Z';
 	decompressor.output_len = 8;
 
-	try decompressor.expandInitialRle();
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	var crc = Crc32Bzip2.init();
+	_ = try decompressor.emitInitialRle(&out.writer, &crc);
+	const expanded = out.written();
 
-	try std.testing.expectEqual(@as(usize, 9), decompressor.output_len);
-	try std.testing.expectEqualSlices(u8, "XYAAAAAAZ", decompressor.output[0..9]);
+	try std.testing.expectEqual(@as(usize, 9), expanded.len);
+	try std.testing.expectEqualSlices(u8, "XYAAAAAAZ", expanded[0..9]);
+}
+
+test "initial RLE expansion - run missing its count byte is CorruptData" {
+	const allocator = std.testing.allocator;
+
+	var decompressor = try Decompressor.init(allocator);
+	defer decompressor.deinit();
+
+	@memcpy(decompressor.output[0..5], "xAAAA");
+	decompressor.output_len = 5;
+
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	var crc = Crc32Bzip2.init();
+	try std.testing.expectError(Error.CorruptData, decompressor.emitInitialRle(&out.writer, &crc));
 }
 
 // ============ Compression Tests (TDD - write tests first!) ============
@@ -4970,4 +4954,86 @@ test "diagnostics: every single-bit flip lies inside [window_start_bit, bit_offs
 	}
 	// Sanity: nearly every flip must be detected (padding/level-digit flips may not be).
 	try std.testing.expect(errors_seen * 100 >= flips * 95);
+}
+
+// ============ validate work order 2026-09-30 ============
+
+test "decompressStream: RLE1 expansion memory is independent of run length (validate 2026-09-30 #1)" {
+	const allocator = std.testing.allocator;
+	var peaks: [2]usize = undefined;
+	for ([_]usize{ 1 << 20, 32 << 20 }, 0..) |len, i| {
+		const zeros = try allocator.alloc(u8, len);
+		defer allocator.free(zeros);
+		@memset(zeros, 0);
+		const stream = try compress(allocator, zeros);
+		defer allocator.free(stream);
+
+		var peak: PeakAllocator = .{ .child = allocator };
+		var reader: std.Io.Reader = .fixed(stream);
+		var discard_buf: [4096]u8 = undefined;
+		var discard: std.Io.Writer.Discarding = .init(&discard_buf);
+		try decompressStream(peak.allocator(), &reader, &discard.writer, .{});
+		try std.testing.expectEqual(@as(u64, len), discard.fullCount());
+		peaks[i] = peak.peak;
+	}
+	// Metamorphic: 32x longer runs in one block must not raise peak memory.
+	try std.testing.expectEqual(peaks[0], peaks[1]);
+}
+
+test "decompressStream: 1-3 trailing header bytes after a stream are UnexpectedEof (validate 2026-09-30 #2)" {
+	const allocator = std.testing.allocator;
+	const stream = try compress(allocator, "complete stream");
+	defer allocator.free(stream);
+
+	// Classifier over the set of trailing fragments: only nothing is clean.
+	const tails = [_][]const u8{ "", "B", "BZ", "BZh", "BZh9" };
+	const expect_ok = [_]bool{ true, false, false, false, false };
+	for (tails, expect_ok) |tail, ok| {
+		const input = try std.mem.concat(allocator, u8, &.{ stream, tail });
+		defer allocator.free(input);
+		var reader: std.Io.Reader = .fixed(input);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		const result = decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag });
+		if (ok) {
+			try result;
+		} else {
+			try std.testing.expectError(Error.UnexpectedEof, result);
+			try std.testing.expectEqual(@as(u32, 1), diag.stream_index);
+			try std.testing.expectEqual(@as(u64, stream.len) * 8, diag.stream_start_bit);
+		}
+		// The slice API must agree.
+		if (decompress(allocator, input)) |out| {
+			allocator.free(out);
+			try std.testing.expect(ok);
+		} else |err| {
+			try std.testing.expect(!ok);
+			try std.testing.expectEqual(Error.UnexpectedEof, err);
+		}
+	}
+}
+
+test "decompressStream: level digit caps block size at level*100000 (validate 2026-09-30 #3)" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 150_000, 11);
+	defer allocator.free(data);
+	const stream = try compressWithOptions(allocator, data, .{ .level = 9 });
+	defer allocator.free(stream);
+	const input = try allocator.dupe(u8, stream);
+	defer allocator.free(input);
+
+	// One block of well over 100k symbols: only digit '1' is too small for it.
+	for ("123456789") |digit| {
+		input[3] = digit;
+		var reader: std.Io.Reader = .fixed(input);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		const result = decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag });
+		if (digit == '1') {
+			try std.testing.expectError(Error.OutputOverflow, result);
+			try std.testing.expectEqual(Diagnostics.Phase.symbol_data, diag.phase);
+		} else {
+			try result;
+		}
+	}
 }
