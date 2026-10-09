@@ -14,8 +14,8 @@
 	.fingerprint = 0x8e3eb16965d939b,
 	.dependencies = .{
 		.progrez = .{
-			.url = "https://github.com/pmarreck/progrez/archive/7d70ce8.tar.gz",
-			.hash = "progrez-0.1.0-0YJXrpMFAgARHkoD6RpFfS8kNgQEiYNu2ZbswsuBm2hf",
+			.url = "https://github.com/pmarreck/progrez/archive/9f7cc53d6ecdf216d15fe8dd8327b00fc240ec09.tar.gz",
+			.hash = "progrez-0.1.0-0YJXrvcHAgCLC8LMnQUppHj9fowlnE7I0EQo4-hHwb3n",
 		},
 	},
 }
