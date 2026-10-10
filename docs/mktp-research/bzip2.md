@@ -188,16 +188,37 @@ only measured breakdown.
 
 Future replays use `tests/differential/replay-runner`, run from a clean
 checkout of the commit under test. It refuses a dirty tree and a state
-directory inside `$TMPDIR`, creates a fresh private directory under
-`${XDG_STATE_HOME:-$HOME/.local/state}/bzip2z-replays/`, and runs `./test`,
-the ReleaseSafe build and the sweep. It keeps their logs, the sweep report
-and stderr, and writes `status.json` with per-stage exit statuses plus
-source, binary, reference and report identities. It exits nonzero if any
-stage fails, the build fails (the sweep is then skipped, not run against a
-stale binary), or the report is missing, unlabeled or has zero trials.
-`tests/differential/replay-runner-test`, run by `./test`, checks those
-outcomes with injected fake steps, and a mutation check confirmed it
-catches an ignored test failure and an accepted zero-trial report.
+directory inside `$TMPDIR`. It creates a fresh private directory under
+`${XDG_STATE_HOME:-$HOME/.local/state}/bzip2z-replays/`, runs `./test`, the
+ReleaseSafe build and the sweep, and keeps their logs, the sweep report and
+stderr. It succeeds only when:
+
+- every stage exits 0, and the binary under test exists;
+- the report is JSON that matches the declared domain in
+  `tests/differential/sniper-domain.json` exactly: definition, classifier,
+  trial count, and each corpus item's name, size, stride and sha256. The
+  trial count must also equal the sum of ceil(bytes x 8 / stride) over the
+  corpus, so the count is derived from the extents, not trusted;
+- the reference binary exists and is executable;
+- every pristine control is accepted by both decoders, and no crash,
+  experiment error or unexplained disagreement is reported;
+- the source revision is unchanged and the tree clean after all steps.
+
+It writes `status.json` with jq after every stage, atomically, with
+per-stage statuses, the source, binary, reference, report and domain
+identities, and a `complete` flag set only at the end. A run killed
+mid-way therefore leaves its completed stages on record, marked incomplete.
+It exits nonzero if any write of that receipt fails. `tests/differential/replay-runner-test`, run by `./test`,
+checks each of these outcomes with injected fake steps in a throwaway
+repository. That includes the six false successes an independent review
+found in the first version: an unwritable receipt, a non-JSON report, a
+wrong classifier or trial count, a missing binary, a quoted reference path
+that broke hand-written JSON, and a build step that moved HEAD. Also covered:
+an empty corpus, a failed pristine control, a nonzero failing-outcome count,
+a missing reference, and termination during the build. Five mutation checks
+were each caught by their control: an ignored test status, an accepted
+zero-trial report, a dropped classifier comparison, a disabled
+source-stability check, and dropped per-stage receipt writes.
 
 #### Classifier versions
 

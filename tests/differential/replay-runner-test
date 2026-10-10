@@ -1,45 +1,62 @@
 #!/usr/bin/env bash
-# Controls for tests/differential/replay-runner: with injected fake steps, a
-# failing test, build or sweep, a missing or zero-trial report, a dirty source
-# tree, or a state directory inside $TMPDIR must each make the runner fail.
-# Only the all-good case may pass. Prints nothing on success.
+# Controls for tests/differential/replay-runner, using injected fake steps in a
+# throwaway repository. Every case except all-good must make the runner exit
+# nonzero; all-good must also leave a parseable status.json with stage
+# statuses and identities. Prints nothing on success.
 set -u
 
 runner="$(cd "$(dirname "$0")" && pwd)/replay-runner"
 root="$(mktemp -d "${TMPDIR:-/tmp}/replay-runner-test.XXXXXX")"
 failures=0
 
-# A throwaway clean git repository stands in for the bzip2z checkout.
 repo="$root/repo"
 mkdir -p "$repo/out" && git -C "$repo" init -q && printf 'x\n' > "$repo/file" && printf 'out/\n' > "$repo/.gitignore"
 git -C "$repo" add file .gitignore && git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m init
 printf 'binary\n' > "$repo/out/bin"
 
-# Fake sweep: behavior chosen by FAKE_SWEEP; arguments are BIN REF.
+# The declared domain the runner must enforce exactly.
+manifest="$root/domain.json"
+cat > "$manifest" <<'JSON'
+{"definition":"d1","classifier":"classifier/v2","trials":24,
+ "corpus":[{"name":"c","bytes":3,"stride":1,"sha256":"aa"}]}
+JSON
+
+# Fake sweep: prints a report chosen by FAKE_SWEEP, ignoring BIN and REF.
 fake_sweep="$root/fake-sweep"
 cat > "$fake_sweep" <<'SWEEP'
 #!/usr/bin/env bash
+good='{"definition":"d1","classifier":"classifier/v2","reference":"r","corpus":[{"name":"c","bytes":3,"stride":1,"sha256":"aa","control":"accept/accept"}],"trials":24,"both_accept":1,"both_reject":4,"intentional_divergence":0,"experiment_error":0,"bzip2z_only_reject":0,"reference_only_reject":0,"bzip2z_crash":0,"reference_crash":0}'
 case "${FAKE_SWEEP:-good}" in
-	good) printf '{"definition":"d","classifier":"classifier/v2","trials":5}\n' ;;
-	fail) printf '{"definition":"d","classifier":"classifier/v2","trials":5}\n'; exit 1 ;;
+	good) echo "$good" ;;
+	fail) echo "$good"; exit 1 ;;
 	missing) exit 0 ;;
-	zero) printf '{"definition":"d","classifier":"classifier/v2","trials":0}\n' ;;
-	unlabeled) printf '{"definition":"d","trials":5}\n' ;;
+	zero) echo "$good" | sed 's/"trials":24/"trials":0/' ;;
+	nonjson) echo 'definition d1 "classifier":"classifier/v2" "trials":24' ;;
+	other-classifier) echo "$good" | sed 's#classifier/v2#classifier/v99#' ;;
+	other-count) echo "$good" | sed 's/"trials":24/"trials":1/' ;;
+	other-corpus) echo "$good" | sed 's/"sha256":"aa"/"sha256":"bb"/' ;;
+	control-failed) echo "$good" | sed 's#accept/accept#accept/reject#' ;;
+	empty-corpus) echo "$good" | jq -c '.corpus = []' ;;
+	failing-outcome) echo "$good" | sed 's/"bzip2z_crash":0/"bzip2z_crash":1/' ;;
 esac
 SWEEP
 chmod +x "$fake_sweep"
+reference="$root/ref"; printf '#!/bin/sh\n' > "$reference"; chmod +x "$reference"
+quoted_reference="$root/ref\"quoted"; cp "$reference" "$quoted_reference"
 
-# run NAME EXPECT_ZERO [VAR=VALUE...]: runs the runner with fakes and checks
-# whether its exit status is zero as expected.
+# run NAME EXPECT_ZERO [VAR=VALUE...]
 run() {
 	local name="$1" expect_zero="$2"; shift 2
-	local state="$root/state-$name" jobtmp="$root/jobtmp-$name"
+	local jobtmp="$root/jobtmp-$name"
 	mkdir -p "$jobtmp"
-	(
+	# The outer group silences the shell's own "Killed" report for the
+	# termination case; the runner's output still goes to $name.out.
+	{ (
 		cd "$repo" || exit 99
-		env TMPDIR="$jobtmp" REPLAY_STATE_DIR="$state" REPLAY_TEST_CMD=true REPLAY_BUILD_CMD=true \
-			REPLAY_SWEEP_CMD="$fake_sweep" REPLAY_BIN="$repo/out/bin" REPLAY_REFERENCE=/bin/true "$@" "$runner"
-	) > "$root/$name.out" 2>&1
+		env TMPDIR="$jobtmp" REPLAY_STATE_DIR="$root/state-$name" REPLAY_DOMAIN="$manifest" \
+			REPLAY_TEST_CMD=true REPLAY_BUILD_CMD=true REPLAY_SWEEP_CMD="$fake_sweep" \
+			REPLAY_BIN="$repo/out/bin" REPLAY_REFERENCE="$reference" "$@" "$runner"
+	) > "$root/$name.out" 2>&1; } 2>/dev/null
 	local rc=$?
 	if [ "$expect_zero" = yes ] && [ $rc -ne 0 ]; then
 		echo "FAIL $name: expected success, got exit $rc"; cat "$root/$name.out"; failures=$((failures + 1))
@@ -54,26 +71,50 @@ run build-fails no REPLAY_BUILD_CMD=false
 run sweep-fails no FAKE_SWEEP=fail
 run report-missing no FAKE_SWEEP=missing
 run zero-trials no FAKE_SWEEP=zero
-run report-unlabeled no FAKE_SWEEP=unlabeled
-
-# Evidence of the good run: per-stage statuses and hashes in status.json.
-status="$root/state-all-good/status.json"
-if [ ! -s "$status" ] || ! grep -q '"test": 0' "$status" || ! grep -q '"sweep": 0' "$status" || ! grep -q '"binary_sha256": "[0-9a-f]\{64\}"' "$status"; then
-	echo "FAIL all-good: status.json missing stage statuses or binary hash"; cat "$status" 2>/dev/null; failures=$((failures + 1))
+run report-not-json no FAKE_SWEEP=nonjson
+run other-classifier no FAKE_SWEEP=other-classifier
+run other-trial-count no FAKE_SWEEP=other-count
+run other-corpus-hash no FAKE_SWEEP=other-corpus
+run control-failed no FAKE_SWEEP=control-failed
+run failing-outcome-count no FAKE_SWEEP=failing-outcome
+run empty-corpus no FAKE_SWEEP=empty-corpus
+run reference-missing no REPLAY_REFERENCE="$root/no-such-reference"
+run binary-missing no REPLAY_BIN="$repo/out/no-such-bin"
+run build-moves-head no REPLAY_BUILD_CMD="git -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved"
+mkdir -p "$root/state-status-unwritable/status.json"
+run status-unwritable no
+# Termination mid-run (the build kills the runner) must leave the completed
+# test stage on record and the receipt marked incomplete.
+run terminated-in-build no REPLAY_BUILD_CMD='kill -KILL $PPID'
+if ! jq -e '.stages.test == 0 and .complete == false' "$root/state-terminated-in-build/status.json" >/dev/null 2>&1; then
+	echo "FAIL terminated-in-build: completed stage not durable or receipt not marked incomplete"; cat "$root/state-terminated-in-build/status.json" 2>/dev/null; failures=$((failures + 1))
 fi
-# A failed build must skip the sweep rather than test a stale binary.
-if ! grep -q '"sweep": "skipped"' "$root/state-build-fails/status.json" 2>/dev/null; then
+run quoted-reference yes REPLAY_REFERENCE="$quoted_reference"
+
+# Good runs must leave a parseable status.json with stages and identities.
+for name in all-good quoted-reference; do
+	status="$root/state-$name/status.json"
+	if ! jq -e '.stages.test == 0 and .stages.build == 0 and .stages.sweep == 0 and .stages.report == 0
+		and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.report_sha256 | test("^[0-9a-f]{64}$"))
+		and (.source_rev | test("^[0-9a-f]{40}$")) and .failures == 0 and .complete == true' "$status" >/dev/null 2>&1; then
+		echo "FAIL $name: status.json unparseable or incomplete"; cat "$status" 2>/dev/null; failures=$((failures + 1))
+	fi
+done
+if ! jq -e '.reference | endswith("ref\"quoted")' "$root/state-quoted-reference/status.json" >/dev/null 2>&1; then
+	echo "FAIL quoted-reference: reference path not preserved"; failures=$((failures + 1))
+fi
+if ! jq -e '.stages.sweep == "skipped"' "$root/state-build-fails/status.json" >/dev/null 2>&1; then
 	echo "FAIL build-fails: sweep not recorded as skipped"; failures=$((failures + 1))
 fi
 
 # A state directory inside the job's TMPDIR would be deleted with it.
 (
 	cd "$repo" || exit 99
-	env TMPDIR="$root" REPLAY_STATE_DIR="$root/inside-tmp" REPLAY_TEST_CMD=true REPLAY_BUILD_CMD=true \
-		REPLAY_SWEEP_CMD="$fake_sweep" REPLAY_BIN="$repo/out/bin" REPLAY_REFERENCE=/bin/true "$runner"
+	env TMPDIR="$root" REPLAY_STATE_DIR="$root/inside-tmp" REPLAY_DOMAIN="$manifest" REPLAY_TEST_CMD=true \
+		REPLAY_BUILD_CMD=true REPLAY_SWEEP_CMD="$fake_sweep" REPLAY_BIN="$repo/out/bin" REPLAY_REFERENCE="$reference" "$runner"
 ) > "$root/inside-tmp.out" 2>&1 && { echo "FAIL state-inside-tmpdir: expected failure"; failures=$((failures + 1)); }
 
-# A dirty source tree must abort before any step runs.
+# A dirty source tree must abort before any step runs (last: it dirties repo).
 printf 'dirty\n' >> "$repo/file"
 run dirty-source no
 if [ -e "$root/state-dirty-source/test.log" ]; then echo "FAIL dirty-source: steps ran on a dirty tree"; failures=$((failures + 1)); fi

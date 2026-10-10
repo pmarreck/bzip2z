@@ -142,6 +142,8 @@ WRAPPER
 						pkgs.pbzip2
 						# Runs tests/differential/sniper-vs-reference.
 						pkgs.luajit
+						# Parses and writes tests/differential/replay-runner reports and receipts.
+						pkgs.jq
 					];
 
 					shellHook = ''

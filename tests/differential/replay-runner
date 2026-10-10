@@ -3,21 +3,18 @@
 # requires a clean tree, then runs ./test, builds the ReleaseSafe CLI and
 # runs the sniper sweep, keeping every log, the report and identity hashes in
 # a fresh private state directory outside $TMPDIR (which a build scheduler
-# may delete when a job ends). Exits nonzero if any required step fails, the
-# report is missing or empty of trials, or a prerequisite is unmet.
-# Per-stage statuses are written to status.json in the state directory.
+# may delete when a job ends). The report must match the declared domain in
+# tests/differential/sniper-domain.json exactly. Exits nonzero if any stage
+# fails, a check fails, the source revision moves, or the receipt
+# (status.json, written with jq) cannot be written.
 #
 # Injection points (used by tests/differential/replay-runner-test):
-#   REPLAY_STATE_DIR, REPLAY_TEST_CMD, REPLAY_BUILD_CMD, REPLAY_SWEEP_CMD,
-#   REPLAY_BIN, REPLAY_REFERENCE
+#   REPLAY_STATE_DIR, REPLAY_DOMAIN, REPLAY_TEST_CMD, REPLAY_BUILD_CMD,
+#   REPLAY_SWEEP_CMD, REPLAY_BIN, REPLAY_REFERENCE
 set -u
 
-state_parent="${XDG_STATE_HOME:-$HOME/.local/state}/bzip2z-replays"
-if [ -n "${REPLAY_STATE_DIR:-}" ]; then
-	state="$REPLAY_STATE_DIR"
-else
-	mkdir -p "$state_parent" && state="$(mktemp -d "$state_parent/replay-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
-fi
+here="$(cd "$(dirname "$0")" && pwd)"
+domain="${REPLAY_DOMAIN:-$here/sniper-domain.json}"
 test_cmd="${REPLAY_TEST_CMD:-./test}"
 build_cmd="${REPLAY_BUILD_CMD:-zig build -Doptimize=ReleaseSafe}"
 sweep_cmd="${REPLAY_SWEEP_CMD:-tests/differential/sniper-vs-reference}"
@@ -26,7 +23,14 @@ reference="${REPLAY_REFERENCE:-$(command -v bzip2)}"
 
 fail() { echo "replay-runner: $*" >&2; exit 2; }
 
-# Prerequisites: a state directory that survives the job, and a clean tree.
+command -v jq >/dev/null || fail "jq is required"
+jq -e . "$domain" >/dev/null 2>&1 || fail "domain manifest $domain is missing or not JSON"
+if [ -n "${REPLAY_STATE_DIR:-}" ]; then
+	state="$REPLAY_STATE_DIR"
+else
+	state_parent="${XDG_STATE_HOME:-$HOME/.local/state}/bzip2z-replays"
+	mkdir -p "$state_parent" && state="$(mktemp -d "$state_parent/replay-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")" || fail "cannot create state directory"
+fi
 state_abs="$(realpath -m "$state")"
 tmp_abs="$(realpath -m "${TMPDIR:-/tmp}")"
 case "$state_abs/" in "$tmp_abs"/*) fail "state directory $state_abs is inside TMPDIR $tmp_abs and could be deleted with the job" ;; esac
@@ -34,45 +38,72 @@ mkdir -p "$state" && chmod 700 "$state" || fail "cannot create state directory $
 source_rev="$(git rev-parse HEAD 2>/dev/null)" || fail "not a git checkout"
 dirty="$(git status --porcelain | wc -l)"
 [ "$dirty" -eq 0 ] || fail "source tree has $dirty uncommitted change(s); replay needs an exact commit"
-[ -n "$reference" ] || fail "reference bzip2 not found"
+[ -n "$reference" ] && [ -x "$reference" ] || fail "reference bzip2 not found or not executable: $reference"
 
 failures=0
-stages=()
-# stage NAME STATUS: record a stage's status (an exit code or "skipped").
-stage() {
-	stages+=("\"$1\": $( [ "$2" = skipped ] && echo '"skipped"' || echo "$2" )")
-	[ "$2" = 0 ] || failures=$((failures + 1))
+stages='{}'
+report="$state/sweep.json"
+sha() { if [ -f "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo none; fi; }
+
+# write_status COMPLETE: atomically (re)write the receipt; any failure to
+# write it ends the run with exit 3, since an unrecorded run is no evidence.
+write_status() {
+	if ! jq -n --arg source_rev "$source_rev" --arg end_rev "$(git rev-parse HEAD 2>/dev/null)" \
+		--arg binary_sha256 "$(sha "$bin")" --arg reference "$reference" --arg reference_sha256 "$(sha "$reference")" \
+		--arg report_sha256 "$(sha "$report")" --arg domain_sha256 "$(sha "$domain")" \
+		--argjson stages "$stages" --argjson failures "$failures" --argjson complete "$1" \
+		'{source_rev: $source_rev, end_rev: $end_rev, binary_sha256: $binary_sha256, reference: $reference,
+		  reference_sha256: $reference_sha256, report_sha256: $report_sha256, domain_sha256: $domain_sha256,
+		  stages: $stages, failures: $failures, complete: $complete}' > "$state/status.json.tmp" 2>/dev/null \
+		|| ! mv -T "$state/status.json.tmp" "$state/status.json" 2>/dev/null; then
+		echo "replay-runner: cannot write receipt $state/status.json" >&2
+		exit 3
+	fi
 }
+
+# stage NAME STATUS: record an exit status (number) or "skipped", and persist
+# the receipt so completed stages survive a later termination.
+stage() {
+	if [ "$2" = skipped ]; then
+		stages="$(jq -c --arg k "$1" '. + {($k): "skipped"}' <<<"$stages")"
+	else
+		stages="$(jq -c --arg k "$1" --argjson v "$2" '. + {($k): $v}' <<<"$stages")"
+	fi
+	[ "$2" = 0 ] || failures=$((failures + 1))
+	write_status false
+}
+
+write_status false
 
 bash -c "$test_cmd" > "$state/test.log" 2>&1; stage test $?
 bash -c "$build_cmd" > "$state/build.log" 2>&1; build_status=$?; stage build $build_status
 
-report="$state/sweep.json"
-if [ "$build_status" -eq 0 ]; then
-	bash -c "$sweep_cmd \"\$1\" \"\$2\"" sweep "$bin" "$reference" > "$report" 2> "$state/sweep.err"; stage sweep $?
-	# The report must exist, be labeled with its classifier and have trials.
-	report_ok=1
-	[ -s "$report" ] || report_ok=0
-	grep -q '"classifier":"' "$report" 2>/dev/null || report_ok=0
-	trials="$(sed -n 's/.*"trials":\([0-9][0-9]*\).*/\1/p' "$report" 2>/dev/null)"
-	[ -n "$trials" ] && [ "$trials" -gt 0 ] || report_ok=0
-	stage report "$( [ $report_ok -eq 1 ] && echo 0 || echo 1 )"
+if [ "$build_status" -ne 0 ]; then
+	stage binary skipped; stage sweep skipped; stage report skipped
+elif [ ! -f "$bin" ]; then
+	stage binary 1; stage sweep skipped; stage report skipped
 else
-	stage sweep skipped
-	stage report skipped
+	stage binary 0
+	bash -c "$sweep_cmd \"\$1\" \"\$2\"" sweep "$bin" "$reference" > "$report" 2> "$state/sweep.err"; stage sweep $?
+	# The report must be JSON matching the declared domain exactly, with every
+	# pristine control accepted by both sides and no failing outcome.
+	jq -e --slurpfile m "$domain" '
+		.definition == $m[0].definition and .classifier == $m[0].classifier
+		and .trials == $m[0].trials and .trials > 0
+		and .trials == ([.corpus[] | ((.bytes * 8 + .stride - 1) / .stride | floor)] | add)
+		and ([.corpus[] | {name, bytes, stride, sha256}] == [$m[0].corpus[] | {name, bytes, stride, sha256}])
+		and all(.corpus[]; .control == "accept/accept")
+		and .experiment_error == 0 and .bzip2z_only_reject == 0 and .reference_only_reject == 0
+		and .bzip2z_crash == 0 and .reference_crash == 0' "$report" >/dev/null 2>&1
+	stage report $?
 fi
 
-sha() { [ -f "$1" ] && sha256sum "$1" | cut -d' ' -f1 || echo none; }
-{
-	printf '{\n'
-	printf '  "source_rev": "%s",\n' "$source_rev"
-	printf '  "binary_sha256": "%s",\n' "$(sha "$bin")"
-	printf '  "reference": "%s",\n' "$reference"
-	printf '  "report_sha256": "%s",\n' "$(sha "$report")"
-	printf '  "stages": {%s},\n' "$(IFS=,; echo "${stages[*]}")"
-	printf '  "failures": %d\n' "$failures"
-	printf '}\n'
-} | sed 's/{"/{ "/; s/,"/, "/g' > "$state/status.json"
+# The tested revision must not move while the steps run.
+end_rev="$(git rev-parse HEAD 2>/dev/null)"
+end_dirty="$(git status --porcelain | wc -l)"
+if [ "$end_rev" = "$source_rev" ] && [ "$end_dirty" -eq 0 ]; then stage source_stable 0; else stage source_stable 1; fi
+
+write_status true
 
 echo "replay-runner: evidence in $state ($failures failed stage(s))" >&2
 [ "$failures" -eq 0 ]

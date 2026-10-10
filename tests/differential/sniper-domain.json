@@ -1,0 +1,10 @@
+{
+  "definition": "sniper/v1: one bit XOR 1; corpus seed 20261009",
+  "classifier": "classifier/v2",
+  "trials": 7461,
+  "corpus": [
+    { "name": "text-1500-l9", "bytes": 274, "stride": 1, "sha256": "903b01abcc3f93e979e99d1071ce66dd4f869b268fc547ee116e7fe1bb3e829f" },
+    { "name": "two-streams", "bytes": 410, "stride": 1, "sha256": "d55f478011b5567f2433406991297142ada5925400e3b4fb8d40971fd471d68b" },
+    { "name": "pattern-101000-l1-two-blocks", "bytes": 1740, "stride": 7, "sha256": "74599d4fa8fe2db970999879520c2891646f3a739d80daef531ba71a332565de" }
+  ]
+}
