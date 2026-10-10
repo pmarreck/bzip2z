@@ -5081,22 +5081,48 @@ test "decompressStream: level digit caps block size at level*100000 (validate 20
 
 // ============ Differential checks against reference bzip2 (black box) ============
 
-/// Black-box oracle: does reference `bzip2 -tq` exit 0 on these bytes? Only
-/// the exit status is used; no reference source informs these checks.
-fn referenceAccepts(bytes: []const u8) !bool {
+/// Run reference `bzip2 -tq` on `bytes` and return its exit code. The oracle is
+/// a black box: no reference source informs these checks.
+fn referenceExit(bytes: []const u8) !u8 {
 	var tmp = std.testing.tmpDir(.{});
 	defer tmp.cleanup();
 	try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.bz2", .data = bytes });
+	return referenceExitIn(tmp.dir, "in.bz2");
+}
+
+/// Run reference `bzip2 -tq` on a path (relative to a fresh temp dir).
+fn referenceExitOnPath(path: []const u8) !u8 {
+	var tmp = std.testing.tmpDir(.{});
+	defer tmp.cleanup();
+	return referenceExitIn(tmp.dir, path);
+}
+
+fn referenceExitIn(dir: std.Io.Dir, path: []const u8) !u8 {
 	const result = try std.process.run(std.testing.allocator, std.testing.io, .{
-		.argv = &.{ "bzip2", "-tq", "in.bz2" },
-		.cwd = .{ .dir = tmp.dir },
+		.argv = &.{ "bzip2", "-tq", path },
+		.cwd = .{ .dir = dir },
 	});
 	defer std.testing.allocator.free(result.stdout);
 	defer std.testing.allocator.free(result.stderr);
 	return switch (result.term) {
-		.exited => |code| code == 0,
+		.exited => |code| code,
 		else => error.ReferenceDidNotExit,
 	};
+}
+
+/// Reference bzip2's exit contract: 0 accepts, 2 rejects corrupt input.
+/// 1 (environmental) and 3 (internal) are experiment errors, not detections.
+fn verdictFromReferenceExit(code: u8) !bool {
+	return switch (code) {
+		0 => true,
+		2 => false,
+		else => error.ReferenceExperimentError,
+	};
+}
+
+/// Black-box oracle verdict: does reference `bzip2 -t` accept these bytes?
+fn referenceAccepts(bytes: []const u8) !bool {
+	return verdictFromReferenceExit(try referenceExit(bytes));
 }
 
 fn bzip2zAccepts(allocator: Allocator, bytes: []const u8) bool {
@@ -5218,4 +5244,21 @@ test "empty input round-trips without emitting an empty block" {
 	defer allocator.free(out);
 	try std.testing.expectEqual(@as(usize, 0), out.len);
 	try std.testing.expect(try referenceAccepts(stream));
+}
+
+test "reference bzip2 -t exit-code contract (black box)" {
+	const allocator = std.testing.allocator;
+	const good = try compress(allocator, "exit contract probe, exit contract probe");
+	defer allocator.free(good);
+	// Observed process contract of the oracle: 0 valid, 2 corrupt input,
+	// 1 environmental trouble (here: a missing file).
+	try std.testing.expectEqual(@as(u8, 0), try referenceExit(good));
+	try std.testing.expectEqual(@as(u8, 2), try referenceExit(good[0 .. good.len / 2]));
+	try std.testing.expectEqual(@as(u8, 1), try referenceExitOnPath("no-such-file.bz2"));
+	// Only 0 and 2 are verdicts; environmental (1) and internal (3) failures
+	// are experiment errors, never detections.
+	try std.testing.expectEqual(true, try verdictFromReferenceExit(0));
+	try std.testing.expectEqual(false, try verdictFromReferenceExit(2));
+	try std.testing.expectError(error.ReferenceExperimentError, verdictFromReferenceExit(1));
+	try std.testing.expectError(error.ReferenceExperimentError, verdictFromReferenceExit(3));
 }

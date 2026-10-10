@@ -1,6 +1,7 @@
 #!/usr/bin/env luajit
--- Tests the differential sweep's classifier as a classifier over the set of
--- verdict pairs, plus exit-status decoding through real throwaway processes.
+-- Tests the differential sweep's classifier as a classifier over sets: every
+-- verdict pair, every single-bit flip of a stream header, and real process
+-- exit statuses under each binary's exit-code contract.
 -- Prints nothing on success; exits 1 listing every failed case.
 package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/?.lua;" .. package.path
 local classify = require("sniper_classify")
@@ -10,42 +11,61 @@ local function check(name, got, want)
 	if got ~= want then failures[#failures + 1] = string.format("%s: got %s, want %s", name, tostring(got), tostring(want)) end
 end
 
--- Every (ours, reference, trailing-window) combination, with the outcome and
--- whether it must fail the sweep. Only agreement on accept/reject, or the one
--- documented trailing-data divergence, may pass.
-local verdicts = { "accept", "reject", "crash" }
-local expected = {
-	["accept/accept"] = { "both_accept", false },
-	["reject/reject"] = { "both_reject", false },
-	["reject/accept"] = { "bzip2z_only_reject", true },
-	["accept/reject"] = { "reference_only_reject", true },
-	["crash/crash"] = { "both_crash", true },
-	["crash/accept"] = { "bzip2z_crash", true },
-	["crash/reject"] = { "bzip2z_crash", true },
-	["accept/crash"] = { "reference_crash", true },
-	["reject/crash"] = { "reference_crash", true },
-}
+-- 1. Every (bzip2z, reference, excusable) combination. Only agreement on
+-- accept/reject, or bzip2z rejecting an invalid later-stream header that the
+-- reference ignores, may pass. Crashes and experiment errors always fail.
+local verdicts = { "accept", "reject", "crash", "error" }
+local function expected(ours, ref, excusable)
+	if ours == "crash" and ref == "crash" then return "both_crash", true end
+	if ours == "crash" then return "bzip2z_crash", true end
+	if ref == "crash" then return "reference_crash", true end
+	if ours == "error" or ref == "error" then return "experiment_error", true end
+	if ours == ref then return "both_" .. ours, false end
+	if ours == "reject" and excusable then return "intentional_divergence", false end
+	if ours == "reject" then return "bzip2z_only_reject", true end
+	return "reference_only_reject", true
+end
 for _, ours in ipairs(verdicts) do
 	for _, ref in ipairs(verdicts) do
-		for _, window in ipairs({ false, true }) do
-			local key = ours .. "/" .. ref
-			local want = expected[key]
-			if window and key == "reject/accept" then want = { "intentional_divergence", false } end
-			local outcome, fails = classify.classify(ours, ref, window)
-			local name = string.format("classify(%s, window=%s)", key, tostring(window))
-			check(name .. " outcome", outcome, want[1])
-			check(name .. " fails", fails, want[2])
+		for _, excusable in ipairs({ false, true }) do
+			local want_outcome, want_fails = expected(ours, ref, excusable)
+			local outcome, fails = classify.classify(ours, ref, excusable)
+			local name = string.format("classify(%s/%s, excusable=%s)", ours, ref, tostring(excusable))
+			check(name .. " outcome", outcome, want_outcome)
+			check(name .. " fails", fails, want_fails)
 		end
 	end
 end
 
--- Exit-status decoding through real processes, as the sweep runs them.
-local function run(cmd) return classify.verdict_from_exit(classify.exit_code(os.execute(cmd))) end
-check("exit 0", run("sh -c 'exit 0'"), "accept")
-check("exit 1", run("sh -c 'exit 1' 2>/dev/null"), "reject")
-check("exit 2", run("sh -c 'exit 2' 2>/dev/null"), "reject")
-check("SIGABRT", run("sh -c 'sh -c \"kill -ABRT \\$\\$\"' 2>/dev/null"), "crash")
-check("SIGSEGV", run("sh -c 'sh -c \"kill -SEGV \\$\\$\"' 2>/dev/null"), "crash")
+-- 2. Header validity over the set of all 32 single-bit flips of "BZh9":
+-- exactly the two that turn the digit into another legal level stay valid.
+check("header BZh9", classify.header_is_valid("BZh9"), true)
+check("header BZh0", classify.header_is_valid("BZh0"), false)
+local valid_flips = {}
+for bit = 0, 31 do
+	local i = math.floor(bit / 8) + 1
+	local b = ("BZh9"):byte(i)
+	local m = 2 ^ (7 - bit % 8)
+	local flipped = (math.floor(b / m) % 2 == 1) and (b - m) or (b + m)
+	local h = ("BZh9"):sub(1, i - 1) .. string.char(flipped) .. ("BZh9"):sub(i + 1)
+	if classify.header_is_valid(h) then valid_flips[#valid_flips + 1] = h end
+end
+check("valid single-bit flips of BZh9", table.concat(valid_flips, ","), "BZh1,BZh8")
+
+-- 3. Exit-status decoding through real processes, per binary contract.
+local function run(cmd, contract)
+	return classify.verdict_from_exit(classify.exit_code(os.execute(cmd .. " 2>/dev/null")), contract)
+end
+local ref, ours = classify.CONTRACTS.reference, classify.CONTRACTS.bzip2z
+check("reference exit 0", run("sh -c 'exit 0'", ref), "accept")
+check("reference exit 2 (corrupt)", run("sh -c 'exit 2'", ref), "reject")
+check("reference exit 1 (environment)", run("sh -c 'exit 1'", ref), "error")
+check("reference exit 3 (internal)", run("sh -c 'exit 3'", ref), "error")
+check("bzip2z exit 0", run("sh -c 'exit 0'", ours), "accept")
+check("bzip2z exit 1 (failure)", run("sh -c 'exit 1'", ours), "reject")
+check("bzip2z exit 2 (usage)", run("sh -c 'exit 2'", ours), "error")
+check("SIGABRT", run([[sh -c 'sh -c "kill -ABRT \$\$"']], ours), "crash")
+check("SIGSEGV", run([[sh -c 'sh -c "kill -SEGV \$\$"']], ref), "crash")
 
 if #failures > 0 then
 	for _, f in ipairs(failures) do io.stderr:write("FAIL " .. f .. "\n") end

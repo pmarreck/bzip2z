@@ -133,7 +133,10 @@ Corpus (seed 20261009; pristine controls accepted by both decoders):
 | two-streams | 410 | 1 (exhaustive) | `d55f478011b5567f2433406991297142ada5925400e3b4fb8d40971fd471d68b` |
 | pattern-101000-l1-two-blocks | 1740 | 7 (coprime with 8) | `74599d4fa8fe2db970999879520c2891646f3a739d80daef531ba71a332565de` |
 
-Result (2026-10-09/10; three runs plus one replay with the documented command, all identical):
+Historical result with classifier/v1 (2026-10-09/10; three runs plus one
+replay with the documented command at `cfd3b7c`, all identical). These counts
+are preserved as measured. classifier/v1 had three limitations, corrected in
+classifier/v2 (see "Classifier versions" below):
 
 | Outcome | Trials |
 |---|---|
@@ -148,6 +151,33 @@ Result (2026-10-09/10; three runs plus one replay with the documented command, a
 These are deterministic counts over a fixed mutation domain, not a sample
 estimate of real-world damage. The multi-block stream is covered at one bit
 in seven.
+
+#### Classifier versions
+
+classifier/v1 (`cfd3b7c`):
+
+- It treated every nonzero, non-signal exit as a rejection. Reference bzip2
+  exits 1 for environmental trouble and 3 for an internal failure; neither is
+  a detection. The v1 runs did not record which code produced each reference
+  rejection, so the 7402 "both reject" count cannot distinguish them.
+- It excused every bzip2z-reject/reference-accept flip inside the second
+  stream's 32-bit header as trailing data, including flips that leave a legal
+  header. Analysis of the logged positions shows this did not change the v1
+  counts. 24 of the 32 header bits are in the `BZh` bytes, and every flip
+  there breaks the magic. Of the 8 digit bits, 6 yield a non-digit and 2
+  yield legal levels ('1', '8'). Those 2 were logged as both-accept (bits
+  2220 and 2223), not excused. So all 30 excused flips were invalid headers.
+- It passed a trial in which both decoders crashed. No crash occurred in any
+  v1 run.
+
+classifier/v2 applies per-binary exit contracts and counts any other exit as
+an experiment error that fails the sweep. Reference: 0 accept, 2 reject. bzip2z
+CLI: 0 accept, 1 reject; its exit 1 also covers I/O failures, a limitation
+mitigated by per-item pristine controls run in the same environment. v2
+excuses a flip only when the resulting later-stream header is invalid, and
+fails on any crash. `tests/differential/classify-test` (run by `./test`)
+checks v2 over every verdict pair, every single-bit flip of a `BZh9` header
+and real process exit statuses.
 
 ## Residual blind class
 

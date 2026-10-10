@@ -13,6 +13,11 @@ package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/?.lua;" .. package.pat
 local classify = require("sniper_classify")
 
 local DEFINITION = "sniper/v1: one bit XOR 1; corpus seed 20261009"
+-- classifier/v1 (cfd3b7c) flattened all nonzero non-signal exits into reject,
+-- excused every second-header flip, and passed when both sides crashed.
+-- classifier/v2 applies per-binary exit contracts, excuses only flips that
+-- leave a later stream header invalid, and fails on any crash or error.
+local CLASSIFIER = "classifier/v2"
 local SEED = 20261009
 local MULTI_BLOCK_STRIDE = 7 -- coprime with 8: every bit-in-byte position is hit
 
@@ -65,8 +70,8 @@ local function pattern_bytes(length)
 	return table.concat(t)
 end
 
-local function verdict(bin, path)
-	return classify.verdict_from_exit(sh(string.format("%q -t %q >/dev/null 2>&1", bin, path)))
+local function verdict(bin, path, contract)
+	return classify.verdict_from_exit(sh(string.format("%q -t %q >/dev/null 2>&1", bin, path)), contract)
 end
 
 local function flip(data, bit)
@@ -98,7 +103,7 @@ local corpus = {
 	{ name = "pattern-101000-l1-two-blocks", data = read_file(workdir .. "/pattern.bz2"), stride = MULTI_BLOCK_STRIDE },
 }
 
-local totals = { trials = 0, both_accept = 0, both_reject = 0, intentional_divergence = 0, bzip2z_only_reject = 0, reference_only_reject = 0, bzip2z_crash = 0, reference_crash = 0 }
+local totals = { trials = 0, both_accept = 0, both_reject = 0, intentional_divergence = 0, experiment_error = 0, bzip2z_only_reject = 0, reference_only_reject = 0, bzip2z_crash = 0, reference_crash = 0 }
 local entries = {}
 local exit_status = 0
 local mutant = workdir .. "/mutant.bz2"
@@ -106,7 +111,7 @@ local mutant = workdir .. "/mutant.bz2"
 for _, item in ipairs(corpus) do
 	local pristine = workdir .. "/" .. item.name .. ".bz2"
 	write_file(pristine, item.data)
-	local control_ours, control_ref = verdict(bzip2z, pristine), verdict(reference, pristine)
+	local control_ours, control_ref = verdict(bzip2z, pristine, classify.CONTRACTS.bzip2z), verdict(reference, pristine, classify.CONTRACTS.reference)
 	if control_ours ~= "accept" or control_ref ~= "accept" then
 		io.stderr:write(string.format("CONTROL FAILED %s: bzip2z=%s reference=%s\n", item.name, control_ours, control_ref))
 		exit_status = 1
@@ -115,14 +120,17 @@ for _, item in ipairs(corpus) do
 	entries[#entries + 1] = string.format('{"name":"%s","bytes":%d,"stride":%d,"sha256":"%s","control":"%s/%s"}', item.name, #item.data, item.stride, sha, control_ours, control_ref)
 
 	for bit = 0, #item.data * 8 - 1, item.stride do
-		write_file(mutant, flip(item.data, bit))
-		local ours, ref = verdict(bzip2z, mutant), verdict(reference, mutant)
+		local mutated = flip(item.data, bit)
+		write_file(mutant, mutated)
+		local ours, ref = verdict(bzip2z, mutant, classify.CONTRACTS.bzip2z), verdict(reference, mutant, classify.CONTRACTS.reference)
 		totals.trials = totals.trials + 1
 		if ours == "crash" then totals.bzip2z_crash = totals.bzip2z_crash + 1 end
 		if ref == "crash" then totals.reference_crash = totals.reference_crash + 1 end
 		local window = item.trailing_header_bits
 		local in_window = window ~= nil and bit >= window[1] and bit <= window[2]
-		local outcome, fails = classify.classify(ours, ref, in_window)
+		local header_start = window and math.floor(window[1] / 8) + 1
+		local excusable = in_window and not classify.header_is_valid(mutated:sub(header_start, header_start + 3))
+		local outcome, fails = classify.classify(ours, ref, excusable)
 		-- Crashes are tallied per side above; count every other outcome here.
 		if totals[outcome] and not outcome:find("crash", 1, true) then totals[outcome] = totals[outcome] + 1 end
 		if outcome == "both_accept" then
@@ -136,7 +144,7 @@ for _, item in ipairs(corpus) do
 	end
 end
 
-print(string.format('{"definition":"%s","reference":"%s","corpus":[%s],"trials":%d,"both_accept":%d,"both_reject":%d,"intentional_divergence":%d,"bzip2z_only_reject":%d,"reference_only_reject":%d,"bzip2z_crash":%d,"reference_crash":%d}',
-	DEFINITION, capture(string.format("%q --version 2>&1 </dev/null | head -1", reference)):gsub('"', "'"), table.concat(entries, ","),
-	totals.trials, totals.both_accept, totals.both_reject, totals.intentional_divergence, totals.bzip2z_only_reject, totals.reference_only_reject, totals.bzip2z_crash, totals.reference_crash))
+print(string.format('{"definition":"%s","classifier":"%s","reference":"%s","corpus":[%s],"trials":%d,"both_accept":%d,"both_reject":%d,"intentional_divergence":%d,"experiment_error":%d,"bzip2z_only_reject":%d,"reference_only_reject":%d,"bzip2z_crash":%d,"reference_crash":%d}',
+	DEFINITION, CLASSIFIER, capture(string.format("%q --version 2>&1 </dev/null | head -1", reference)):gsub('"', "'"), table.concat(entries, ","),
+	totals.trials, totals.both_accept, totals.both_reject, totals.intentional_divergence, totals.experiment_error, totals.bzip2z_only_reject, totals.reference_only_reject, totals.bzip2z_crash, totals.reference_crash))
 os.exit(exit_status)
