@@ -57,6 +57,11 @@
 						zig
 						pkgs.bzip2
 						pkgs.pbzip2
+					] ++ pkgs.lib.optionals runTests [
+						# Tools for the sweep classifier and replay-runner lanes of ./test.
+						pkgs.luajit
+						pkgs.jq
+						pkgs.git
 					] ++ pkgs.lib.optionals isDarwin [
 						pkgs.darwin.cctools
 						pkgs.apple-sdk
@@ -71,23 +76,17 @@
 						cp -r ${zigDeps}/* "$ZIG_GLOBAL_CACHE_DIR/"
 						chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"
 						${if runTests then ''
+						# CI runs the same complete entry point as local runs (./test).
 						# On Linux, Zig with link_libc bakes /lib64/ld-linux-x86-64.so.2
 						# as the dynamic linker, which doesn't exist in the Nix sandbox.
 						# patchelf 0.18 aborts on Zig 0.16 ELFs and -Ddynamic-linker
-						# breaks shared-lib subcompilation. Instead, compile artifacts
-						# and run each via Nix's loader directly. The CLI gets a thin
-						# shell wrapper so test_cli's $cli invocations work unchanged.
+						# breaks shared-lib subcompilation. Instead, test binaries run
+						# through Nix's loader (BZIP2Z_TEST_EXEC) and the CLI binaries
+						# get thin shell wrappers so tests/cli_test works unchanged.
 						${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-						zig build test-compile
 						zig build
 						DL_PATH="$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
-						rc=0
-						for f in zig-out/test-bins/*; do
-							[ -x "$f" ] || continue
-							"$DL_PATH" "$f" || rc=1
-						done
-						[ $rc -eq 0 ] || { echo "Unit/bench tests failed"; exit 1; }
-						patchShebangs build tests/cli_test
+						patchShebangs build test tests
 						# Wrap all binaries in zig-out/bin via Nix's loader.
 						# --argv0 preserves the original basename (e.g. "bzcatz",
 						# not "bzcatz.real"); cli.c picks compress vs decompress
@@ -107,13 +106,12 @@ WRAPPER
 							chmod +x "$orig"
 						done
 						ls -la zig-out/bin/
-						SKIP_BUILD=1 bash tests/cli_test
+						BZIP2Z_TEST_EXEC="$DL_PATH" SKIP_BUILD=1 ./test
 						''}
 						${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) ''
-						zig build test
 						zig build
-						patchShebangs build tests/cli_test
-						SKIP_BUILD=1 bash tests/cli_test
+						patchShebangs build test tests
+						SKIP_BUILD=1 ./test
 						''}
 						'' else ":"}
 						zig build -Doptimize=ReleaseFast -Dtarget=${zigTarget}

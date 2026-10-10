@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -u
 
 if [ -f "$HOME/dotfiles/bin/src/capture.bash" ]; then
 	source "$HOME/dotfiles/bin/src/capture.bash"
@@ -137,17 +137,26 @@ fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_cmd="$root_dir/build"
+failures=0
+
+# Setup problems end the run; assertion failures are counted and reported.
+die() {
+	echo "cli_test: $*" >&2
+	exit 1
+}
+fail() {
+	echo "FAIL: $*" >&2
+	failures=$((failures + 1))
+}
 
 work_dir="$TMPDIR/bzip2z-cli-$RANDOM-$$"
-mkdir -p "$work_dir"
+mkdir -p "$work_dir" || die "cannot create $work_dir"
 trap 'rm -rf "$work_dir"' EXIT
 
-cd "$root_dir"
+cd "$root_dir" || die "cannot enter $root_dir"
 
-if ! command -v bzip2 >/dev/null 2>&1; then
-	echo "bzip2 not found in PATH; skipping CLI tests"
-	exit 0
-fi
+# The reference bzip2 is a required interop oracle, not an optional extra.
+command -v bzip2 >/dev/null 2>&1 || die "reference bzip2 not found in PATH"
 
 # Allow CI / nix-build to skip the implicit rebuild — when SKIP_BUILD=1, the
 # caller has already prepared zig-out/bin (and possibly wrapped binaries with
@@ -155,20 +164,17 @@ fi
 # would call `nix build` recursively, which either fails or overwrites the
 # wrapped binaries with raw ELFs that lack a usable dynamic interpreter.
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
-	"$build_cmd" >/dev/null
+	"$build_cmd" >/dev/null || die "build failed"
 fi
 
 bin_dir="$root_dir/zig-out/bin"
 cli="${BZIP2Z_CLI:-$bin_dir/bzip2z}"
 
-if [ ! -x "$cli" ]; then
-	echo "bzip2z binary not found at $cli"
-	exit 1
-fi
+[ -x "$cli" ] || die "bzip2z binary not found at $cli"
 
 printf '%s' "The quick brown fox jumps over the lazy dog.
-Pack my box with five dozen liquor jugs." >"$work_dir/sample.txt"
-cp "$work_dir/sample.txt" "$work_dir/sample.orig"
+Pack my box with five dozen liquor jugs." >"$work_dir/sample.txt" || die "cannot write sample"
+cp "$work_dir/sample.txt" "$work_dir/sample.orig" || die "cannot copy sample"
 
 out=""
 err=""
@@ -176,96 +182,52 @@ rc=0
 
 # about flag
 capture "$cli" --about
-if [ "$rc" -ne 0 ]; then
-	echo "--about failed"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "--about exited $rc"
 
 # compress file
 capture "$cli" -k "$work_dir/sample.txt"
-if [ "$rc" -ne 0 ]; then
-	echo "compress failed"
-	exit 1
-fi
-if [ ! -f "$work_dir/sample.txt.bz2" ]; then
-	echo "compressed file missing"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "compress exited $rc"
+[ -f "$work_dir/sample.txt.bz2" ] || fail "compressed file missing"
 
 # test integrity
 capture "$cli" -t "$work_dir/sample.txt.bz2"
-if [ "$rc" -ne 0 ]; then
-	echo "test mode failed"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "test mode exited $rc"
 
 # decompress to stdout
 capture "$cli" -dc "$work_dir/sample.txt.bz2"
-if [ "$rc" -ne 0 ]; then
-	echo "decompress to stdout failed"
-	exit 1
-fi
-
-if ! diff -u "$work_dir/sample.txt" <(printf '%s' "$out") >/dev/null; then
-	echo "stdout decompression mismatch"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "decompress to stdout exited $rc"
+diff -u "$work_dir/sample.txt" <(printf '%s' "$out") >/dev/null || fail "stdout decompression mismatch"
 
 # round-trip with system bzip2
 capture bzip2 -k -f "$work_dir/sample.txt"
-if [ "$rc" -ne 0 ]; then
-	echo "system bzip2 failed"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "system bzip2 exited $rc"
 
 rm -f "$work_dir/sample.txt"
 
 capture "$cli" -dk "$work_dir/sample.txt.bz2"
-if [ "$rc" -ne 0 ]; then
-	echo "zig bzip2 decompress failed"
-	exit 1
-fi
-
-if ! diff -u "$work_dir/sample.orig" "$work_dir/sample.txt" >/dev/null; then
-	echo "round-trip mismatch"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "zig bzip2 decompress exited $rc"
+diff -u "$work_dir/sample.orig" "$work_dir/sample.txt" >/dev/null || fail "round-trip mismatch"
 
 # bzcat binary
 capture "$bin_dir/bzcatz" "$work_dir/sample.txt.bz2"
-if [ "$rc" -ne 0 ]; then
-	echo "bzcat failed"
-	exit 1
-fi
-
-if ! diff -u "$work_dir/sample.orig" <(printf '%s' "$out") >/dev/null; then
-	echo "bzcat output mismatch"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "bzcat exited $rc"
+diff -u "$work_dir/sample.orig" <(printf '%s' "$out") >/dev/null || fail "bzcat output mismatch"
 
 # -j parallel multi-stream (round-trip, stdout)
 big_src="$work_dir/big.bin"
 big_orig="$work_dir/big.orig"
-head -c 2000000 </dev/urandom >"$big_src"
-cp "$big_src" "$big_orig"
+head -c 2000000 </dev/urandom >"$big_src" || die "cannot write random input"
+cp "$big_src" "$big_orig" || die "cannot copy random input"
 
 capture "$cli" -j 2 -k "$big_src"
-if [ "$rc" -ne 0 ]; then
-	echo "parallel compress failed"
-	exit 1
-fi
-if [ ! -f "$big_src.bz2" ]; then
-	echo "parallel compressed file missing"
-	exit 1
-fi
+[ "$rc" -eq 0 ] || fail "parallel compress exited $rc"
+[ -f "$big_src.bz2" ] || fail "parallel compressed file missing"
 
 big_out="$work_dir/big.out"
-if ! "$cli" -j 2 -dc "$big_src.bz2" >"$big_out"; then
-	echo "parallel decompress to stdout failed"
-	exit 1
-fi
+"$cli" -j 2 -dc "$big_src.bz2" >"$big_out" || fail "parallel decompress to stdout failed"
+diff -u "$big_orig" "$big_out" >/dev/null || fail "parallel stdout decompression mismatch"
 
-if ! diff -u "$big_orig" "$big_out" >/dev/null; then
-	echo "parallel stdout decompression mismatch"
+if [ "$failures" -ne 0 ]; then
+	echo "cli_test: $failures failure(s)" >&2
 	exit 1
 fi

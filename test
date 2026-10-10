@@ -1,23 +1,41 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Complete test entry point, shared by local runs and the Nix ci-tests check.
+# Every lane runs even after an earlier one fails; the exit status is nonzero
+# if any lane failed or a required tool is missing.
+set -u
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$root_dir" || exit 1
+source "$root_dir/tests/lib/lanes.bash" || exit 1
 
 if [ -z "${ZIG_GLOBAL_CACHE_DIR:-}" ]; then
-	zig_global_cache_dir="${TMPDIR:-/tmp}/zig-global-cache"
-	export ZIG_GLOBAL_CACHE_DIR="$zig_global_cache_dir"
+	export ZIG_GLOBAL_CACHE_DIR="${TMPDIR:-/tmp}/zig-global-cache"
 fi
 
-zig build test
+# BZIP2Z_TEST_EXEC runs Zig test binaries through a given program; the Nix
+# check sets it to the sandbox's dynamic loader.
+zig_test_args=()
+if [ -n "${BZIP2Z_TEST_EXEC:-}" ]; then
+	zig_test_args+=("-Dtest-exec=$BZIP2Z_TEST_EXEC")
+fi
+
+lane "zig unit tests" zig build test "${zig_test_args[@]}"
 
 # Corrupt-input tests must also run with safety checks on: ReleaseFast wraps
 # integer overflow silently, so only a checked build turns it into a failure.
-zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input"
+lane "zig corrupt-input tests (ReleaseSafe)" \
+	zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input" "${zig_test_args[@]}"
 
 # Differential sweep classifier (injected verdicts and real exit statuses),
 # and a compile check of the sweep driver itself; the sweep is a separate,
 # bounded campaign: tests/differential/sniper-vs-reference.
-luajit tests/differential/classify-test
-luajit -bl tests/differential/sniper-vs-reference >/dev/null
+lane "sweep classifier" luajit tests/differential/classify-test
+lane "sweep driver compiles" bash -c 'luajit -bl tests/differential/sniper-vs-reference >/dev/null'
 # Replay runner controls: injected failing steps must never yield a green run.
-tests/differential/replay-runner-test
+lane "replay runner controls" tests/differential/replay-runner-test
+# Lane runner controls: injected failing lanes must never yield a green run.
+lane "lane runner controls" tests/lanes-test
 
-./tests/cli_test
+lane "CLI tests" ./tests/cli_test
+
+lanes_finish

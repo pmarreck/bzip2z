@@ -23,8 +23,9 @@ JSON
 
 # Fake sweep: prints a report chosen by FAKE_SWEEP, ignoring BIN and REF.
 fake_sweep="$root/fake-sweep"
-cat > "$fake_sweep" <<'SWEEP'
-#!/usr/bin/env bash
+# Shebang from the running bash: build sandboxes have no /usr/bin/env.
+printf '#!%s\n' "$BASH" > "$fake_sweep"
+cat >> "$fake_sweep" <<'SWEEP'
 good='{"definition":"d1","classifier":"classifier/v2","reference":"r","corpus":[{"name":"c","bytes":3,"stride":1,"sha256":"aa","control":"accept/accept"}],"trials":24,"both_accept":1,"both_reject":23,"intentional_divergence":0,"experiment_error":0,"bzip2z_only_reject":0,"reference_only_reject":0,"bzip2z_crash":0,"reference_crash":0}'
 case "${FAKE_SWEEP:-good}" in
 	good) echo "$good" ;;

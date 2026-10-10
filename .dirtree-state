@@ -8,4 +8,6 @@ annotate=[
 	tests/differential/sniper-domain.json = Declared sniper-sweep domain (definition, classifier, trial count, corpus names/sizes/strides/sha256) enforced by replay-runner
 	tests/differential/sniper-vs-reference = Bounded LuaJIT sniper sweep: bzip2z -t vs reference bzip2 -t on bit-flipped corpus; crashes counted apart
 	tests/differential/sniper_classify.lua = Pure verdict/outcome classifier for the differential sweep (exit-status decoding, crash handling)
+	tests/lanes-test = Controls for the lane runner: injected failing, missing, killed and empty lanes must never yield a green run
+	tests/lib/lanes.bash = Lane runner for ./test: records each required check's exit status, runs every lane, fails on any failure or an empty run
 ]

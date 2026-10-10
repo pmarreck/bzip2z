@@ -121,10 +121,16 @@ pub fn build(b: *std.Build) void {
 		test_filters = &.{filter};
 	}
 
+	// Run test binaries through an explicit program (e.g. the Nix dynamic
+	// loader inside the build sandbox, where the FHS interpreter path Zig
+	// bakes into libc-linked executables does not exist).
+	const test_exec = b.option([]const u8, "test-exec", "Program that runs each test binary (e.g. a dynamic loader)");
+
 	const lib_tests = b.addTest(.{
 		.root_module = lib_mod,
 		.filters = test_filters,
 	});
+	if (test_exec) |exec| lib_tests.setExecCmd(&.{ exec, null });
 	const run_lib_tests = b.addRunArtifact(lib_tests);
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_lib_tests.step);
@@ -160,6 +166,7 @@ pub fn build(b: *std.Build) void {
 		.root_module = bench_mod,
 		.filters = test_filters,
 	});
+	if (test_exec) |exec| bench_tests.setExecCmd(&.{ exec, null });
 	const run_bench_tests = b.addRunArtifact(bench_tests);
 	test_step.dependOn(&run_bench_tests.step);
 	test_compile_step.dependOn(&b.addInstallArtifact(bench_tests, .{

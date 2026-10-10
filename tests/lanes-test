@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Controls for tests/lib/lanes.bash: injected failing, crashing and missing
+# lanes must make the run fail, every lane must still run, and an empty run
+# must never count as green.
+set -u
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+failures=0
+
+fail() {
+	echo "FAIL: $*" >&2
+	failures=$((failures + 1))
+}
+
+# run_case NAME EXPECTED_STATUS LANE_COMMAND...
+# Each LANE_COMMAND is a shell snippet run as one lane; a marker file proves
+# the lane after it still ran.
+run_case() {
+	local name="$1" expected="$2"
+	shift 2
+	local marker
+	marker="$(mktemp "${TMPDIR:-/tmp}/lanes-test.XXXXXX")" || { fail "$name: mktemp"; return; }
+	local status
+	(
+		source "$root_dir/tests/lib/lanes.bash"
+		local i=0
+		for snippet in "$@"; do
+			i=$((i + 1))
+			lane "lane-$i" bash -c "$snippet"
+		done
+		lane "after" bash -c "echo ran >'$marker'"
+		lanes_finish
+	) >/dev/null 2>&1
+	status=$?
+	if [ "$expected" = "pass" ] && [ "$status" -ne 0 ]; then
+		fail "$name: expected success, got $status"
+	elif [ "$expected" = "fail" ] && [ "$status" -eq 0 ]; then
+		fail "$name: expected failure, got 0"
+	fi
+	if [ "$(cat "$marker" 2>/dev/null)" != "ran" ]; then
+		fail "$name: lane after the injected one did not run"
+	fi
+	rm -f "$marker"
+}
+
+run_case "all lanes pass" pass "true" "exit 0"
+run_case "one lane returns 1" fail "true" "exit 1" "true"
+run_case "lane returns 3" fail "exit 3"
+run_case "lane command missing" fail "no-such-command-bzip2z-lanes"
+run_case "lane killed by a signal" fail 'kill -9 $$'
+run_case "first lane fails" fail "false" "true"
+
+# A run with no lanes at all is not evidence of anything.
+(
+	source "$root_dir/tests/lib/lanes.bash"
+	lanes_finish
+) >/dev/null 2>&1
+[ $? -ne 0 ] || fail "empty run: expected failure, got 0"
+
+# The summary names each failing lane and its status.
+summary="$(
+	source "$root_dir/tests/lib/lanes.bash"
+	lane good true >/dev/null 2>&1
+	lane bad bash -c "exit 4" >/dev/null 2>&1
+	lanes_finish 2>&1 >/dev/null
+)"
+case "$summary" in
+	*"bad"*"4"*) ;;
+	*) fail "summary does not name the failing lane and status: $summary" ;;
+esac
+
+if [ "$failures" -ne 0 ]; then
+	echo "lanes-test: $failures failure(s)" >&2
+	exit 1
+fi
+echo "lanes-test: all controls passed"
