@@ -683,7 +683,7 @@ pub const Decompressor = struct {
 
 		// Number of selectors (15 bits)
 		self.num_selectors = try bits.readBits(15);
-		if (self.num_selectors == 0 or self.num_selectors > MAX_SELECTORS) {
+		if (self.num_selectors == 0) {
 			return Error.CorruptData;
 		}
 
@@ -720,6 +720,10 @@ pub const Decompressor = struct {
 				}
 			}
 		}
+
+		// With no byte values in use there is nothing a block could decode to
+		// (and EOB would collide with RUNB), so the map itself is corrupt.
+		if (self.num_in_use == 0) return Error.CorruptData;
 	}
 
 	fn readSelectors(self: *Decompressor, comptime ReaderType: type, bits: *BitReader(ReaderType)) Error!void {
@@ -748,8 +752,12 @@ pub const Decompressor = struct {
 			}
 			mtf[0] = selected;
 
-			self.selectors[i] = selected;
+			// The 15-bit count allows up to 32767 selectors, but a block of at most
+			// 900000 symbols needs no more than MAX_SELECTORS. Extra ones are
+			// legal and unused: consume them, keep the first MAX_SELECTORS.
+			if (i < MAX_SELECTORS) self.selectors[i] = selected;
 		}
+		self.num_selectors = @min(self.num_selectors, MAX_SELECTORS);
 	}
 
 	fn readHuffmanTrees(self: *Decompressor, comptime ReaderType: type, bits: *BitReader(ReaderType)) Error!void {
@@ -914,10 +922,12 @@ pub const Decompressor = struct {
 
 	/// Reconstruct the block (inverse BWT, then initial-RLE expansion), stream
 	/// its bytes to `writer` and verify the block CRC. Returns the byte count.
-	/// Output is written before the CRC can be checked, as in reference bzip2.
+	/// Output is written before the CRC can be checked.
 	fn decodeBlockInternal(self: *Decompressor, check_crc: bool, writer: anytype) Error!u64 {
 		self.diag.phase = .block_reconstruct;
-		if (self.block_size == 0) return 0;
+		// No early exit for an empty block: the BWT origin pointer must index
+		// into the block, which a zero-length block cannot satisfy, so
+		// inverseBwt rejects it (InvalidBwtIndex) instead of skipping the CRC.
 
 		// Build inverse BWT transformation
 		try self.buildInverseBwt();
@@ -2244,6 +2254,10 @@ const BlockPrepared = struct {
 	codes: [MAX_ALPHA_SIZE]u32,
 	symbols: []u16,
 	original_len: usize = 0,
+	/// Unused selectors written after the required ones. The format allows up
+	/// to 32767; real encoders write exactly ceil(symbols / 50), so this stays
+	/// 0 except in tests that build legal over-long selector lists.
+	extra_selectors: usize = 0,
 
 	pub fn deinit(self: *BlockPrepared, allocator: Allocator) void {
 		allocator.free(self.symbols);
@@ -2433,7 +2447,7 @@ fn writeBlock(bits: anytype, block: *const BlockPrepared) !void {
 	}
 
 	try bits.writeBits(2, 3);
-	const num_selectors = (block.symbols.len + GROUP_SIZE - 1) / GROUP_SIZE;
+	const num_selectors = (block.symbols.len + GROUP_SIZE - 1) / GROUP_SIZE + block.extra_selectors;
 	try bits.writeBits(@intCast(num_selectors), 15);
 
 	for (0..num_selectors) |_| {
@@ -4541,22 +4555,45 @@ test "compress round-trip with null bytes in data" {
 
 /// Craft a single-block stream whose MTF/RLE2 symbol sequence is `symbols`
 /// (EOB appended), so tests can feed the decoder chains a real encoder never emits.
-fn craftStreamWithSymbols(allocator: Allocator, symbols: []const u16) ![]u8 {
+const CraftOptions = struct {
+	/// MTF/RLE2 symbols before EOB; null keeps the encoder's own symbols for "ab".
+	symbols: ?[]const u16 = null,
+	/// Write a symbol map with no byte values in use (alphabet = RUNA, RUNB).
+	empty_symbol_map: bool = false,
+	extra_selectors: usize = 0,
+	/// Stored block (and so stream) CRC; null keeps the encoder's CRC for "ab".
+	crc: ?u32 = null,
+	primary_index: ?u32 = null,
+};
+
+/// Craft a single-block stream with chosen header fields and symbol sequence
+/// (EOB appended), so tests can feed decoders shapes a real encoder never emits.
+fn craftStream(allocator: Allocator, opts: CraftOptions) ![]u8 {
 	var block = try prepareBlock(allocator, "ab");
 	defer block.deinit(allocator);
 
-	const eob: u16 = @intCast(block.num_in_use + 1);
-	const crafted = try allocator.alloc(u16, symbols.len + 1);
-	@memcpy(crafted[0..symbols.len], symbols);
-	crafted[symbols.len] = eob;
-	allocator.free(block.symbols);
-	block.symbols = crafted;
+	if (opts.empty_symbol_map) {
+		@memset(&block.in_use, false);
+		block.num_in_use = 0;
+		block.alpha_size = 2;
+	}
+	if (opts.symbols) |symbols| {
+		const eob: u16 = @intCast(block.num_in_use + 1);
+		const crafted = try allocator.alloc(u16, symbols.len + 1);
+		@memcpy(crafted[0..symbols.len], symbols);
+		crafted[symbols.len] = eob;
+		allocator.free(block.symbols);
+		block.symbols = crafted;
 
-	// Every symbol needs a nonzero code length for a well-formed table.
-	var freqs: [MAX_ALPHA_SIZE]u32 = [_]u32{1} ** MAX_ALPHA_SIZE;
-	for (crafted) |s| freqs[s] += 1;
-	block.lengths = computeHuffmanLengths(&freqs, block.alpha_size, 17);
-	block.codes = buildHuffmanCodes(&block.lengths, block.alpha_size);
+		// Every symbol needs a nonzero code length for a well-formed table.
+		var freqs: [MAX_ALPHA_SIZE]u32 = [_]u32{1} ** MAX_ALPHA_SIZE;
+		for (crafted) |sym| freqs[sym] += 1;
+		block.lengths = computeHuffmanLengths(&freqs, block.alpha_size, 17);
+		block.codes = buildHuffmanCodes(&block.lengths, block.alpha_size);
+	}
+	block.extra_selectors = opts.extra_selectors;
+	if (opts.crc) |crc| block.crc = crc;
+	if (opts.primary_index) |p| block.primary_index = p;
 
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer output.deinit(allocator);
@@ -4564,6 +4601,10 @@ fn craftStreamWithSymbols(allocator: Allocator, symbols: []const u16) ![]u8 {
 	try writeSingleBlockStream(&aw.writer, 9, &block);
 	output = aw.toArrayList();
 	return output.toOwnedSlice(allocator);
+}
+
+fn craftStreamWithSymbols(allocator: Allocator, symbols: []const u16) ![]u8 {
+	return craftStream(allocator, .{ .symbols = symbols });
 }
 
 test "corrupt input: over-long RUNB chain is rejected, not overflowed (validate inbox 2026-09-29)" {
@@ -5036,4 +5077,137 @@ test "decompressStream: level digit caps block size at level*100000 (validate 20
 			try result;
 		}
 	}
+}
+
+// ============ Differential checks against reference bzip2 (black box) ============
+
+/// Black-box oracle: does reference `bzip2 -tq` exit 0 on these bytes? Only
+/// the exit status is used; no reference source informs these checks.
+fn referenceAccepts(bytes: []const u8) !bool {
+	var tmp = std.testing.tmpDir(.{});
+	defer tmp.cleanup();
+	try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.bz2", .data = bytes });
+	const result = try std.process.run(std.testing.allocator, std.testing.io, .{
+		.argv = &.{ "bzip2", "-tq", "in.bz2" },
+		.cwd = .{ .dir = tmp.dir },
+	});
+	defer std.testing.allocator.free(result.stdout);
+	defer std.testing.allocator.free(result.stderr);
+	return switch (result.term) {
+		.exited => |code| code == 0,
+		else => error.ReferenceDidNotExit,
+	};
+}
+
+fn bzip2zAccepts(allocator: Allocator, bytes: []const u8) bool {
+	const out = decompress(allocator, bytes) catch return false;
+	allocator.free(out);
+	return true;
+}
+
+/// Set every padding bit after the (single) stream footer to 1.
+fn setFooterPadding(data: []u8) usize {
+	const end_bit = findFooterBit(data, 32).? + 48 + 32;
+	var bit = end_bit;
+	while (bit < @as(u64, data.len) * 8) : (bit += 1) data[bit / 8] |= @as(u8, 0x80) >> @intCast(bit % 8);
+	return @intCast(@as(u64, data.len) * 8 - end_bit);
+}
+
+test "differential: crafted structural cases agree with reference bzip2" {
+	const allocator = std.testing.allocator;
+	const empty_crc = Crc32Bzip2.init().final();
+
+	const Case = struct { name: []const u8, bytes: []u8 };
+	var cases: std.ArrayListUnmanaged(Case) = .empty;
+	defer {
+		for (cases.items) |c| allocator.free(c.bytes);
+		cases.deinit(allocator);
+	}
+
+	// Pristine controls: both decoders must accept these.
+	try cases.append(allocator, .{ .name = "control: encoder block for \"ab\"", .bytes = try craftStream(allocator, .{}) });
+	try cases.append(allocator, .{ .name = "control: compress(text)", .bytes = try compress(allocator, "differential control text, differential control text") });
+	// Selector count at the 18002 limit, and above it (format allows 32767).
+	try cases.append(allocator, .{ .name = "selectors: exactly 18002", .bytes = try craftStream(allocator, .{ .extra_selectors = 18002 - 1 }) });
+	try cases.append(allocator, .{ .name = "selectors: 18010 (> 18002)", .bytes = try craftStream(allocator, .{ .extra_selectors = 18009 }) });
+	// Blocks that decode to zero bytes.
+	try cases.append(allocator, .{ .name = "block: only EOB, map {a,b}", .bytes = try craftStream(allocator, .{ .symbols = &.{}, .crc = empty_crc }) });
+	try cases.append(allocator, .{ .name = "block: empty symbol map, only EOB", .bytes = try craftStream(allocator, .{ .symbols = &.{}, .empty_symbol_map = true, .crc = empty_crc }) });
+	// BWT origin pointer beyond the block.
+	try cases.append(allocator, .{ .name = "block: origPtr beyond block length", .bytes = try craftStream(allocator, .{ .primary_index = 1000 }) });
+	// Nonzero padding bits after the stream footer.
+	{
+		var tries: usize = 0;
+		while (true) : (tries += 1) {
+			const text = try std.fmt.allocPrint(allocator, "padding probe {d}", .{tries});
+			defer allocator.free(text);
+			const s = try compress(allocator, text);
+			if (setFooterPadding(s) > 0) {
+				try cases.append(allocator, .{ .name = "stream: footer padding bits set", .bytes = s });
+				break;
+			}
+			allocator.free(s);
+		}
+	}
+
+	var mismatches: usize = 0;
+	for (cases.items) |c| {
+		const ours = bzip2zAccepts(allocator, c.bytes);
+		const ref = try referenceAccepts(c.bytes);
+		if (ours != ref) {
+			mismatches += 1;
+			std.debug.print("MISMATCH {s}: bzip2z={s} reference={s}\n", .{ c.name, if (ours) "accept" else "reject", if (ref) "accept" else "reject" });
+		}
+	}
+	try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "differential: trailing garbage is an intentional, documented divergence" {
+	const allocator = std.testing.allocator;
+	const s = try compress(allocator, "stream followed by junk");
+	defer allocator.free(s);
+	const input = try std.mem.concat(allocator, u8, &.{ s, "junk!junk!" });
+	defer allocator.free(input);
+	// bzip2z reports trailing bytes so integrity checkers can flag them.
+	try std.testing.expect(!bzip2zAccepts(allocator, input));
+	// Reference bzip2 1.0.8 `-t` exits 0 (it warns and ignores trailing data).
+	try std.testing.expect(try referenceAccepts(input));
+}
+
+test "structural rejections report the right error and phase" {
+	const allocator = std.testing.allocator;
+	const empty_crc = Crc32Bzip2.init().final();
+	const Expect = struct { opts: CraftOptions, err: Error, phase: Diagnostics.Phase };
+	const expectations = [_]Expect{
+		.{ .opts = .{ .symbols = &.{}, .crc = empty_crc }, .err = Error.InvalidBwtIndex, .phase = .block_reconstruct },
+		.{ .opts = .{ .symbols = &.{}, .empty_symbol_map = true, .crc = empty_crc }, .err = Error.CorruptData, .phase = .symbol_map },
+	};
+	for (expectations) |e| {
+		const stream = try craftStream(allocator, e.opts);
+		defer allocator.free(stream);
+		var reader: std.Io.Reader = .fixed(stream);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		try std.testing.expectError(e.err, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+		try std.testing.expectEqual(e.phase, diag.phase);
+	}
+}
+
+test "over-long selector list (18010 > 18002) decodes to the original bytes" {
+	const allocator = std.testing.allocator;
+	const stream = try craftStream(allocator, .{ .extra_selectors = 18009 });
+	defer allocator.free(stream);
+	const out = try decompress(allocator, stream);
+	defer allocator.free(out);
+	try std.testing.expectEqualSlices(u8, "ab", out);
+}
+
+test "empty input round-trips without emitting an empty block" {
+	const allocator = std.testing.allocator;
+	const stream = try compress(allocator, "");
+	defer allocator.free(stream);
+	const out = try decompress(allocator, stream);
+	defer allocator.free(out);
+	try std.testing.expectEqual(@as(usize, 0), out.len);
+	try std.testing.expect(try referenceAccepts(stream));
 }
