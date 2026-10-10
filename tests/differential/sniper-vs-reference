@@ -9,6 +9,9 @@
 -- Exit status: 0 when no disagreement and no crash, 1 otherwise. Mutants and
 -- the corpus stay in a fresh directory under $TMPDIR for replay.
 
+package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/?.lua;" .. package.path
+local classify = require("sniper_classify")
+
 local DEFINITION = "sniper/v1: one bit XOR 1; corpus seed 20261009"
 local SEED = 20261009
 local MULTI_BLOCK_STRIDE = 7 -- coprime with 8: every bit-in-byte position is hit
@@ -18,10 +21,7 @@ local reference = arg[2] or "bzip2"
 local workdir = (os.getenv("TMPDIR") or "/tmp") .. "/sniper-vs-reference-" .. tostring(os.time()) .. "-" .. tostring(math.random(1e9))
 
 local function sh(cmd)
-	local status = os.execute(cmd)
-	-- LuaJIT returns the raw wait status; via /bin/sh a signal shows as 128+n.
-	if type(status) == "number" and status > 255 then status = math.floor(status / 256) end
-	return status
+	return classify.exit_code(os.execute(cmd))
 end
 
 local function capture(cmd)
@@ -66,10 +66,7 @@ local function pattern_bytes(length)
 end
 
 local function verdict(bin, path)
-	local code = sh(string.format("%q -t %q >/dev/null 2>&1", bin, path))
-	if code == 0 then return "accept" end
-	if code >= 128 then return "crash" end
-	return "reject"
+	return classify.verdict_from_exit(sh(string.format("%q -t %q >/dev/null 2>&1", bin, path)))
 end
 
 local function flip(data, bit)
@@ -123,26 +120,19 @@ for _, item in ipairs(corpus) do
 		totals.trials = totals.trials + 1
 		if ours == "crash" then totals.bzip2z_crash = totals.bzip2z_crash + 1 end
 		if ref == "crash" then totals.reference_crash = totals.reference_crash + 1 end
-		if ours == "accept" and ref == "accept" then
+		local window = item.trailing_header_bits
+		local in_window = window ~= nil and bit >= window[1] and bit <= window[2]
+		local outcome, fails = classify.classify(ours, ref, in_window)
+		-- Crashes are tallied per side above; count every other outcome here.
+		if totals[outcome] and not outcome:find("crash", 1, true) then totals[outcome] = totals[outcome] + 1 end
+		if outcome == "both_accept" then
 			-- Undetected by both: the residual blind class. Logged, not a failure.
 			io.stderr:write(string.format("BOTH-ACCEPT %s bit %d (byte %d of %d)\n", item.name, bit, math.floor(bit / 8), #item.data))
-			totals.both_accept = totals.both_accept + 1
-		elseif ours == "reject" and ref == "reject" then
-			totals.both_reject = totals.both_reject + 1
-		elseif ours == "reject" and ref == "accept" and item.trailing_header_bits
-			and bit >= item.trailing_header_bits[1] and bit <= item.trailing_header_bits[2] then
-			totals.intentional_divergence = totals.intentional_divergence + 1
-			goto continue
-		elseif ours == "reject" and ref == "accept" then
-			totals.bzip2z_only_reject = totals.bzip2z_only_reject + 1
-		elseif ours == "accept" and ref == "reject" then
-			totals.reference_only_reject = totals.reference_only_reject + 1
 		end
-		if ours ~= ref then
-			io.stderr:write(string.format("DISAGREE %s bit %d: bzip2z=%s reference=%s\n", item.name, bit, ours, ref))
+		if fails then
+			io.stderr:write(string.format("FAIL %s %s bit %d: bzip2z=%s reference=%s\n", outcome, item.name, bit, ours, ref))
 			exit_status = 1
 		end
-		::continue::
 	end
 end
 

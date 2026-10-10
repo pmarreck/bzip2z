@@ -1,0 +1,53 @@
+#!/usr/bin/env luajit
+-- Tests the differential sweep's classifier as a classifier over the set of
+-- verdict pairs, plus exit-status decoding through real throwaway processes.
+-- Prints nothing on success; exits 1 listing every failed case.
+package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/?.lua;" .. package.path
+local classify = require("sniper_classify")
+
+local failures = {}
+local function check(name, got, want)
+	if got ~= want then failures[#failures + 1] = string.format("%s: got %s, want %s", name, tostring(got), tostring(want)) end
+end
+
+-- Every (ours, reference, trailing-window) combination, with the outcome and
+-- whether it must fail the sweep. Only agreement on accept/reject, or the one
+-- documented trailing-data divergence, may pass.
+local verdicts = { "accept", "reject", "crash" }
+local expected = {
+	["accept/accept"] = { "both_accept", false },
+	["reject/reject"] = { "both_reject", false },
+	["reject/accept"] = { "bzip2z_only_reject", true },
+	["accept/reject"] = { "reference_only_reject", true },
+	["crash/crash"] = { "both_crash", true },
+	["crash/accept"] = { "bzip2z_crash", true },
+	["crash/reject"] = { "bzip2z_crash", true },
+	["accept/crash"] = { "reference_crash", true },
+	["reject/crash"] = { "reference_crash", true },
+}
+for _, ours in ipairs(verdicts) do
+	for _, ref in ipairs(verdicts) do
+		for _, window in ipairs({ false, true }) do
+			local key = ours .. "/" .. ref
+			local want = expected[key]
+			if window and key == "reject/accept" then want = { "intentional_divergence", false } end
+			local outcome, fails = classify.classify(ours, ref, window)
+			local name = string.format("classify(%s, window=%s)", key, tostring(window))
+			check(name .. " outcome", outcome, want[1])
+			check(name .. " fails", fails, want[2])
+		end
+	end
+end
+
+-- Exit-status decoding through real processes, as the sweep runs them.
+local function run(cmd) return classify.verdict_from_exit(classify.exit_code(os.execute(cmd))) end
+check("exit 0", run("sh -c 'exit 0'"), "accept")
+check("exit 1", run("sh -c 'exit 1' 2>/dev/null"), "reject")
+check("exit 2", run("sh -c 'exit 2' 2>/dev/null"), "reject")
+check("SIGABRT", run("sh -c 'sh -c \"kill -ABRT \\$\\$\"' 2>/dev/null"), "crash")
+check("SIGSEGV", run("sh -c 'sh -c \"kill -SEGV \\$\\$\"' 2>/dev/null"), "crash")
+
+if #failures > 0 then
+	for _, f in ipairs(failures) do io.stderr:write("FAIL " .. f .. "\n") end
+	os.exit(1)
+end

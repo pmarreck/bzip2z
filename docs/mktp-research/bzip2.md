@@ -5,12 +5,23 @@ each was confirmed, what was tried and rejected, and what remains undetectable.
 It supports downstream integrity checkers (for example `validate`) that report
 how deeply a bzip2 payload was verified.
 
-Terminology follows validate's glossary. **MKTP** ("Maximum Known Technically
-Possible") means the payload is consumed end to end with every objective check
-currently known to be possible, while documenting which mutations remain
-indistinguishable from legal alternatives. bzip2 carries a mandatory CRC32 over
-every block's decoded bytes and a combined CRC per stream, so most damage is
-detectable; the residual blind class below is small but real.
+Terminology follows validate's glossary (`TERMINOLOGY.md` in the validate
+repository). There, **MKTP** ("Maximum Known Technically Possible") is a
+per-variant status that requires all six of its listed criteria, including an
+analytically derived ceiling, mutation coverage against a pristine control,
+independent replay, and a row in validate's committed MKTP ledger (a
+blessed-hash control file). End-to-end consumption plus an invariant
+inventory is not sufficient. This record is supporting evidence for such a
+decision; it is not a ledger row and does not by itself establish MKTP for any
+bzip2 variant. bzip2 carries a mandatory CRC32 over every block's decoded bytes
+and a combined CRC per stream, so most damage is detectable; the residual
+blind class below is small but real.
+
+**Authority of reference evidence.** bzip2 has no official normative
+specification; its reference implementation serves as the de facto
+definition. A reference verdict shows
+decodability and interoperability for that input; it is not proof that a
+bitstream constraint is required or forbidden by the format.
 
 ## Provenance
 
@@ -22,6 +33,25 @@ inputs (black-box oracle). The language model that assisted with this work may
 have seen the reference implementation in its training data; that prior can
 influence which hypotheses were tested, but it cannot confirm them.
 Confirmation rests on the oracle runs and tests recorded here.
+
+## Which tree produced each result
+
+Every result in this record was produced in an isolated git worktree checked
+out from a pushed commit, never from a working copy with unrelated
+uncommitted changes:
+
+- Crafted differential, unit tests and all three build modes: worktree at
+  `e3a0773`, then `75e24cc`, then the tree committed as `cfd3b7c`, with each
+  suite run immediately before its commit and no other edits in between.
+- Sniper sweep binary `5d38bf33…`: built in that worktree at `75e24cc` (the
+  sweep script itself was uncommitted at the time and is not part of the
+  binary). Replay binary `ccd7ddfd…`: built from the `cfd3b7c` sources.
+- An exact-commit replay of `./test` in a fresh worktree is recorded under
+  Experiments.
+
+A separate check ran the suite on a developer working copy that also held
+unrelated uncommitted work. It is not evidence for any commit and is not
+cited here.
 
 ## Pins (2026-10-09/10)
 
@@ -46,7 +76,7 @@ check rejected.
 | Block or footer 48-bit magic | `decodeStreams` | indirect |
 | Symbol map has at least one byte value | `readSymbolMap` | crafted differential (fixed 2026-10-09) |
 | Huffman group count 2-6; selector count >= 1 | `readBlock` | indirect |
-| Selector count up to 32767 accepted, first 18002 kept | `readSelectors` | crafted differential (fixed 2026-10-09; previously a false positive) |
+| Selector count up to 32767 accepted, first 18002 kept | `readSelectors` | crafted differential (fixed 2026-10-09; previously a false positive). Authority: the selector-count field is 15 bits wide in the format description, and the reference binary decodes an 18010-selector stream; that is interoperability evidence, not a normative statement |
 | Selector MTF index < group count | `readSelectors` | indirect |
 | Code lengths 1-20 throughout delta coding | `readHuffmanTrees` | indirect |
 | Huffman decode terminates within 20 bits | `HuffmanTable.decode` | indirect; no-panic sweeps in Debug and ReleaseSafe |
@@ -134,8 +164,14 @@ Mutations both decoders accept, from the 29 both-accept trials:
   symbols the block never uses, so decoding is identical; not individually
   verified.
 
-Beyond single-bit damage, multi-bit corruption of a block's coded data is
-caught by its CRC32 except with probability about 2^-32 per damaged block.
+Beyond single-bit damage: if corruption decodes without a structural error,
+the block's CRC32 is the remaining check. Under a random-error model, where
+the damage leaves the block's decoded bytes effectively uniformly random, a
+damaged block passes its CRC32 with probability about 2^-32. That figure
+assumes randomness. Damage in coded data maps nonlinearly onto decoded bytes,
+so no burst-length guarantee carries over from coded to decoded data, and
+CRC32 gives no protection against deliberate tampering, since anyone can
+recompute a matching CRC.
 
 ## Intentional divergence
 

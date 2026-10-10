@@ -12,4 +12,10 @@ zig build test
 # integer overflow silently, so only a checked build turns it into a failure.
 zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input"
 
+# Differential sweep classifier (injected verdicts and real exit statuses),
+# and a compile check of the sweep driver itself; the sweep is a separate,
+# bounded campaign: tests/differential/sniper-vs-reference.
+luajit tests/differential/classify-test
+luajit -bl tests/differential/sniper-vs-reference >/dev/null
+
 ./tests/cli_test
