@@ -46,8 +46,11 @@ uncommitted changes:
 - Sniper sweep binary `5d38bf33…`: built in that worktree at `75e24cc` (the
   sweep script itself was uncommitted at the time and is not part of the
   binary). Replay binary `ccd7ddfd…`: built from the `cfd3b7c` sources.
-- An exact-commit replay of `./test` in a fresh worktree is recorded under
-  Experiments.
+- Exact-commit replays in a clean detached worktree (zero dirty files
+  before and after): `./test` at `fa2ceb3` passed (direct run, bounded only
+  by a timeout), and `./test`, a ReleaseSafe build and one classifier/v2
+  sweep at `08b0fcb` ran as a single job under the shared build budget
+  (2 slots, 16 GiB cap, no swap). See "classifier/v2 replay" below.
 
 A separate check ran the suite on a developer working copy that also held
 unrelated uncommitted work. It is not evidence for any commit and is not
@@ -151,6 +154,27 @@ classifier/v2 (see "Classifier versions" below):
 These are deterministic counts over a fixed mutation domain, not a sample
 estimate of real-world damage. The multi-block stream is covered at one bit
 in seven.
+
+#### classifier/v2 replay (2026-10-10, `08b0fcb`)
+
+| Item | Value |
+|---|---|
+| Source | `08b0fcb49e853c560b9d3a764f7b6fef1d9172c7`, clean detached worktree |
+| `./test` | exit 0 |
+| Binary | ReleaseSafe `bzip2z`, sha256 `bc61ad75c2ff0943b46401e51a1529749eea61d898df0f836ffcbb4a44afe765` |
+| Oracle | the reference bzip2 1.0.8 path in the Pins table |
+| Mutation / classifier | sniper/v1 (corpus seed 20261009) / classifier/v2 |
+| Sweep result | exit 0: no crash, no experiment error, no unexplained disagreement on either side |
+
+The per-outcome counts and corpus hashes from this replay were lost. The
+job's JSON and stderr went to the build budget's per-job scratch directory,
+which is deleted when a job succeeds. Exit 0 under v2 means no trial was
+classified as failing, but the both-accept, both-reject and divergence
+counts were not retained. A capped rerun writing outside the scratch
+directory was withdrawn before admission, to avoid an automatic retry and
+leave the next build slot to another project. Until a deliberate replay
+records them, the v2 counts are unknown, and the v1 table above remains the
+only measured breakdown.
 
 #### Classifier versions
 
