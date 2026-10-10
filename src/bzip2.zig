@@ -5270,23 +5270,57 @@ fn referenceDecode(allocator: Allocator, bytes: []const u8) !?[]u8 {
 	var tmp = std.testing.tmpDir(.{});
 	defer tmp.cleanup();
 	try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.bz2", .data = bytes });
-	const result = try std.process.run(allocator, std.testing.io, .{
+	return referenceDecodeResult(allocator, try std.process.run(allocator, std.testing.io, .{
 		.argv = &.{ "bzip2", "-dc", "in.bz2" },
 		.cwd = .{ .dir = tmp.dir },
-	});
+	}));
+}
+
+/// Classify a finished `bzip2 -dc` run, taking ownership of its captured
+/// output: stdout is returned on exit 0, everything else is freed.
+fn referenceDecodeResult(allocator: Allocator, result: std.process.RunResult) !?[]u8 {
 	defer allocator.free(result.stderr);
+	errdefer allocator.free(result.stdout);
 	const code = switch (result.term) {
 		.exited => |c| c,
-		else => {
-			allocator.free(result.stdout);
-			return error.ReferenceDidNotExit;
-		},
+		else => return error.ReferenceDidNotExit,
 	};
 	if (try verdictFromReferenceExit(code)) return result.stdout;
 	allocator.free(result.stdout);
 	return null;
 }
 
+
+test "referenceDecodeResult frees captured output on every oracle outcome" {
+	// Injected oracle results (no process): std.testing.allocator fails the
+	// test if any outcome leaks the captured stdout or stderr.
+	const allocator = std.testing.allocator;
+	const Outcome = union(enum) { output: []const u8, rejected, err: anyerror };
+	const Case = struct { term: std.process.Child.Term, expect: Outcome };
+	const cases = [_]Case{
+		.{ .term = .{ .exited = 0 }, .expect = .{ .output = "decoded" } },
+		.{ .term = .{ .exited = 2 }, .expect = .rejected },
+		.{ .term = .{ .exited = 1 }, .expect = .{ .err = error.ReferenceExperimentError } },
+		.{ .term = .{ .exited = 3 }, .expect = .{ .err = error.ReferenceExperimentError } },
+		.{ .term = .{ .unknown = 7 }, .expect = .{ .err = error.ReferenceDidNotExit } },
+	};
+	for (cases) |c| {
+		const result: std.process.RunResult = .{
+			.term = c.term,
+			.stdout = try allocator.dupe(u8, "decoded"),
+			.stderr = try allocator.dupe(u8, "diagnostic text"),
+		};
+		switch (c.expect) {
+			.output => |want| {
+				const got = (try referenceDecodeResult(allocator, result)).?;
+				defer allocator.free(got);
+				try std.testing.expectEqualSlices(u8, want, got);
+			},
+			.rejected => try std.testing.expectEqual(@as(?[]u8, null), try referenceDecodeResult(allocator, result)),
+			.err => |want| try std.testing.expectError(want, referenceDecodeResult(allocator, result)),
+		}
+	}
+}
 /// Bytes with no run of 4+ equal bytes, before or after randomization, so the
 /// encoder's RLE1 leaves them unchanged and the BWT input is exactly the
 /// randomized sequence.
