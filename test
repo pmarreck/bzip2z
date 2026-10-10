@@ -17,5 +17,7 @@ zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input"
 # bounded campaign: tests/differential/sniper-vs-reference.
 luajit tests/differential/classify-test
 luajit -bl tests/differential/sniper-vs-reference >/dev/null
+# Replay runner controls: injected failing steps must never yield a green run.
+tests/differential/replay-runner-test
 
 ./tests/cli_test

@@ -3,6 +3,8 @@ ver=1.2
 annotate=[
 	docs/mktp-research/bzip2.md = bzip2 decoder integrity evidence: invariant inventory, differential results, blind class, pins, rejected ideas
 	tests/differential/classify-test = Set test of the sweep classifier: all verdict pairs plus real-process exit statuses; run by ./test
+	tests/differential/replay-runner = Deliberate evidence replay: clean-tree check, ./test, ReleaseSafe build, sweep; private state dir, status.json, nonzero on any failed stage
+	tests/differential/replay-runner-test = Injected-step controls proving replay-runner cannot go green on failed test/build/sweep, missing/zero-trial report, dirty tree
 	tests/differential/sniper-vs-reference = Bounded LuaJIT sniper sweep: bzip2z -t vs reference bzip2 -t on bit-flipped corpus; crashes counted apart
 	tests/differential/sniper_classify.lua = Pure verdict/outcome classifier for the differential sweep (exit-status decoding, crash handling)
 ]

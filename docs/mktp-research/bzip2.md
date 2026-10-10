@@ -166,6 +166,14 @@ in seven.
 | Mutation / classifier | sniper/v1 (corpus seed 20261009) / classifier/v2 |
 | Sweep result | exit 0: no crash, no experiment error, no unexplained disagreement on either side |
 
+The scheduler job itself exited 0 only because its wrapper ended with an
+`echo`; that aggregate status establishes nothing. The rows above come from
+the wrapper's own per-step lines, each printing the preceding command's
+exit status (`./test exit 0`, `build exit 0`, `sweep exit 0`). Those lines
+were recovered from the session transcript and are kept, with the wrapper
+script and their sha256 sums, in a private state directory outside any
+temporary directory (wrapper stdout sha256 `533b67bcc70345a033e7826c36398e465e67d0c962dcc04c472961594e1d8230`).
+
 The per-outcome counts and corpus hashes from this replay were lost. The
 job's JSON and stderr went to the build budget's per-job scratch directory,
 which is deleted when a job succeeds. Exit 0 under v2 means no trial was
@@ -175,6 +183,21 @@ directory was withdrawn before admission, to avoid an automatic retry and
 leave the next build slot to another project. Until a deliberate replay
 records them, the v2 counts are unknown, and the v1 table above remains the
 only measured breakdown.
+
+#### Replay runner
+
+Future replays use `tests/differential/replay-runner`, run from a clean
+checkout of the commit under test. It refuses a dirty tree and a state
+directory inside `$TMPDIR`, creates a fresh private directory under
+`${XDG_STATE_HOME:-$HOME/.local/state}/bzip2z-replays/`, and runs `./test`,
+the ReleaseSafe build and the sweep. It keeps their logs, the sweep report
+and stderr, and writes `status.json` with per-stage exit statuses plus
+source, binary, reference and report identities. It exits nonzero if any
+stage fails, the build fails (the sweep is then skipped, not run against a
+stale binary), or the report is missing, unlabeled or has zero trials.
+`tests/differential/replay-runner-test`, run by `./test`, checks those
+outcomes with injected fake steps, and a mutation check confirmed it
+catches an ignored test failure and an accepted zero-trial report.
 
 #### Classifier versions
 
