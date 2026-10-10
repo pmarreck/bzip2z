@@ -1,0 +1,6 @@
+# Dirtree: Stateful directory trees in the CLI for humans and LLMs. https://github.com/pmarreck/dirtree
+ver=1.2
+annotate=[
+	docs/mktp-research/bzip2.md = bzip2 decoder integrity evidence: invariant inventory, differential results, blind class, pins, rejected ideas
+	tests/differential/sniper-vs-reference = Bounded LuaJIT sniper sweep: bzip2z -t vs reference bzip2 -t on bit-flipped corpus; crashes counted apart
+]

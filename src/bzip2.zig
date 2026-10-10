@@ -5135,6 +5135,14 @@ test "differential: crafted structural cases agree with reference bzip2" {
 	try cases.append(allocator, .{ .name = "block: empty symbol map, only EOB", .bytes = try craftStream(allocator, .{ .symbols = &.{}, .empty_symbol_map = true, .crc = empty_crc }) });
 	// BWT origin pointer beyond the block.
 	try cases.append(allocator, .{ .name = "block: origPtr beyond block length", .bytes = try craftStream(allocator, .{ .primary_index = 1000 }) });
+	// Level digit smaller than the block it heads (one block of >100k symbols).
+	{
+		const data = try testPayload(allocator, 150_000, 11);
+		defer allocator.free(data);
+		const s = try compressWithOptions(allocator, data, .{ .level = 9 });
+		s[3] = '1';
+		try cases.append(allocator, .{ .name = "stream: level digit '1' over a >100k-symbol block", .bytes = s });
+	}
 	// Nonzero padding bits after the stream footer.
 	{
 		var tries: usize = 0;

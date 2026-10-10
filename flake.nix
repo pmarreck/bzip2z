@@ -140,6 +140,8 @@ WRAPPER
 						pkgs.ripgrep
 						pkgs.bzip2
 						pkgs.pbzip2
+						# Runs tests/differential/sniper-vs-reference.
+						pkgs.luajit
 					];
 
 					shellHook = ''

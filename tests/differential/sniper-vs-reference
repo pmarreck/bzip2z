@@ -1,0 +1,152 @@
+#!/usr/bin/env luajit
+-- Bounded differential "sniper" sweep (one bit XOR 1 per trial): flips bits of
+-- a deterministic pristine corpus and compares the exit status of
+-- `bzip2z -t` (ReleaseSafe, so overflow panics surface as crashes) with the
+-- reference `bzip2 -t`, used purely as a black-box oracle.
+--
+-- Usage: tests/differential/sniper-vs-reference BZIP2Z_BIN [REFERENCE_BIN]
+-- Prints one JSON summary line to stdout and each disagreement to stderr.
+-- Exit status: 0 when no disagreement and no crash, 1 otherwise. Mutants and
+-- the corpus stay in a fresh directory under $TMPDIR for replay.
+
+local DEFINITION = "sniper/v1: one bit XOR 1; corpus seed 20261009"
+local SEED = 20261009
+local MULTI_BLOCK_STRIDE = 7 -- coprime with 8: every bit-in-byte position is hit
+
+local bzip2z = assert(arg[1], "usage: sniper-vs-reference BZIP2Z_BIN [REFERENCE_BIN]")
+local reference = arg[2] or "bzip2"
+local workdir = (os.getenv("TMPDIR") or "/tmp") .. "/sniper-vs-reference-" .. tostring(os.time()) .. "-" .. tostring(math.random(1e9))
+
+local function sh(cmd)
+	local status = os.execute(cmd)
+	-- LuaJIT returns the raw wait status; via /bin/sh a signal shows as 128+n.
+	if type(status) == "number" and status > 255 then status = math.floor(status / 256) end
+	return status
+end
+
+local function capture(cmd)
+	local p = assert(io.popen(cmd))
+	local out = p:read("*a")
+	p:close()
+	return (out:gsub("%s+$", ""))
+end
+
+local function read_file(path)
+	local f = assert(io.open(path, "rb"))
+	local data = f:read("*a")
+	f:close()
+	return data
+end
+
+local function write_file(path, data)
+	local f = assert(io.open(path, "wb"))
+	f:write(data)
+	f:close()
+end
+
+-- Deterministic pseudo-random text from a fixed 31-bit LCG.
+local function lcg_text(seed, length)
+	local words = { "alpha", "block", "crc", "huffman", "run", "length", "stream", "bwt", "mtf", "zero", "\n" }
+	local x, parts, size = seed, {}, 0
+	while size < length do
+		x = (x * 1103515245 + 12345) % 2147483648
+		local w = words[(x % #words) + 1]
+		parts[#parts + 1] = w .. " "
+		size = size + #w + 1
+	end
+	return table.concat(parts):sub(1, length)
+end
+
+local function pattern_bytes(length)
+	local t = {}
+	for i = 0, length - 1 do
+		t[#t + 1] = string.char(((i * 7) % 251 + math.floor(i / 5000)) % 256)
+	end
+	return table.concat(t)
+end
+
+local function verdict(bin, path)
+	local code = sh(string.format("%q -t %q >/dev/null 2>&1", bin, path))
+	if code == 0 then return "accept" end
+	if code >= 128 then return "crash" end
+	return "reject"
+end
+
+local function flip(data, bit)
+	local byte_index = math.floor(bit / 8) + 1
+	local b = data:byte(byte_index)
+	local m = 2 ^ (7 - bit % 8)
+	local flipped = (math.floor(b / m) % 2 == 1) and (b - m) or (b + m)
+	return data:sub(1, byte_index - 1) .. string.char(flipped) .. data:sub(byte_index + 1)
+end
+
+assert(sh("mkdir -p " .. string.format("%q", workdir)) == 0)
+
+-- Pristine corpus, encoded by the reference encoder.
+write_file(workdir .. "/text.txt", lcg_text(SEED, 1500))
+write_file(workdir .. "/second.txt", lcg_text(SEED + 1, 300))
+write_file(workdir .. "/pattern.bin", pattern_bytes(101000))
+assert(sh(string.format("%q -9 -c %q > %q", reference, workdir .. "/text.txt", workdir .. "/text.bz2")) == 0)
+assert(sh(string.format("%q -9 -c %q > %q", reference, workdir .. "/second.txt", workdir .. "/second.bz2")) == 0)
+assert(sh(string.format("%q -1 -c %q > %q", reference, workdir .. "/pattern.bin", workdir .. "/pattern.bz2")) == 0)
+
+local corpus = {
+	{ name = "text-1500-l9", data = read_file(workdir .. "/text.bz2"), stride = 1 },
+	-- Reference bzip2 treats data after a complete stream that is not a valid
+	-- stream header as ignorable trailing garbage (exit 0); bzip2z reports it.
+	-- That one documented divergence is expected only inside the second
+	-- stream's 32-bit "BZh<digit>" header.
+	{ name = "two-streams", data = read_file(workdir .. "/text.bz2") .. read_file(workdir .. "/second.bz2"), stride = 1,
+		trailing_header_bits = { #read_file(workdir .. "/text.bz2") * 8, #read_file(workdir .. "/text.bz2") * 8 + 31 } },
+	{ name = "pattern-101000-l1-two-blocks", data = read_file(workdir .. "/pattern.bz2"), stride = MULTI_BLOCK_STRIDE },
+}
+
+local totals = { trials = 0, both_accept = 0, both_reject = 0, intentional_divergence = 0, bzip2z_only_reject = 0, reference_only_reject = 0, bzip2z_crash = 0, reference_crash = 0 }
+local entries = {}
+local exit_status = 0
+local mutant = workdir .. "/mutant.bz2"
+
+for _, item in ipairs(corpus) do
+	local pristine = workdir .. "/" .. item.name .. ".bz2"
+	write_file(pristine, item.data)
+	local control_ours, control_ref = verdict(bzip2z, pristine), verdict(reference, pristine)
+	if control_ours ~= "accept" or control_ref ~= "accept" then
+		io.stderr:write(string.format("CONTROL FAILED %s: bzip2z=%s reference=%s\n", item.name, control_ours, control_ref))
+		exit_status = 1
+	end
+	local sha = capture(string.format("sha256sum %q | cut -d' ' -f1", pristine))
+	entries[#entries + 1] = string.format('{"name":"%s","bytes":%d,"stride":%d,"sha256":"%s","control":"%s/%s"}', item.name, #item.data, item.stride, sha, control_ours, control_ref)
+
+	for bit = 0, #item.data * 8 - 1, item.stride do
+		write_file(mutant, flip(item.data, bit))
+		local ours, ref = verdict(bzip2z, mutant), verdict(reference, mutant)
+		totals.trials = totals.trials + 1
+		if ours == "crash" then totals.bzip2z_crash = totals.bzip2z_crash + 1 end
+		if ref == "crash" then totals.reference_crash = totals.reference_crash + 1 end
+		if ours == "accept" and ref == "accept" then
+			-- Undetected by both: the residual blind class. Logged, not a failure.
+			io.stderr:write(string.format("BOTH-ACCEPT %s bit %d (byte %d of %d)\n", item.name, bit, math.floor(bit / 8), #item.data))
+			totals.both_accept = totals.both_accept + 1
+		elseif ours == "reject" and ref == "reject" then
+			totals.both_reject = totals.both_reject + 1
+		elseif ours == "reject" and ref == "accept" and item.trailing_header_bits
+			and bit >= item.trailing_header_bits[1] and bit <= item.trailing_header_bits[2] then
+			totals.intentional_divergence = totals.intentional_divergence + 1
+			goto continue
+		elseif ours == "reject" and ref == "accept" then
+			totals.bzip2z_only_reject = totals.bzip2z_only_reject + 1
+		elseif ours == "accept" and ref == "reject" then
+			totals.reference_only_reject = totals.reference_only_reject + 1
+		end
+		if ours ~= ref then
+			io.stderr:write(string.format("DISAGREE %s bit %d: bzip2z=%s reference=%s\n", item.name, bit, ours, ref))
+			exit_status = 1
+		end
+		::continue::
+	end
+end
+
+print(string.format('{"definition":"%s","reference":"%s","corpus":[%s],"trials":%d,"both_accept":%d,"both_reject":%d,"intentional_divergence":%d,"bzip2z_only_reject":%d,"reference_only_reject":%d,"bzip2z_crash":%d,"reference_crash":%d}',
+	DEFINITION, capture(string.format("%q --version 2>&1 </dev/null | head -1", reference)):gsub('"', "'"), table.concat(entries, ","),
+	totals.trials, totals.both_accept, totals.both_reject, totals.intentional_divergence, totals.bzip2z_only_reject, totals.reference_only_reject, totals.bzip2z_crash, totals.reference_crash))
+os.exit(exit_status)
