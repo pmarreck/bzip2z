@@ -21,3 +21,4 @@
 - [x] bzip2 evidence milestone: crafted structural differential vs reference bzip2 (black box) found and fixed 3 gaps (selectors > 18002 false positive, zero-symbol block, empty symbol map); reference-interop tests un-skipped (Zig 0.16 Io/readAlloc); bounded sniper sweep `tests/differential/sniper-vs-reference` (7461 trials, 0 unexplained disagreements, 0 crashes); record in docs/mktp-research/bzip2.md. (completed 2026-10-10 00:20 EDT)
 - [ ] Extend the differential sweep with shotgun (8-16 distinct bits in a 32-byte window) and nuke modes per the mutation vocabulary v2; record seeds and parameters.
 - [ ] Crafted differential cases for randomized blocks and Kraft-violating code-length sets (reference behavior currently untested).
+- [ ] Clean ./test stderr: flake.nix uses deprecated `stdenv.isDarwin` (use `stdenv.hostPlatform.isDarwin`), and tests/cli_test lets `nix build` progress lines reach stderr.
