@@ -57,7 +57,9 @@ const MaxAllocAllocator = struct {
 };
 
 fn testIo() std.Io {
-	return std.Io.Threaded.global_single_threaded.io();
+	// The global single-threaded Io has a failing allocator, so spawning
+	// child processes (the interop tests) would always fail with OutOfMemory.
+	return std.testing.io;
 }
 
 /// Write all bytes to a file. Replaces the pre-0.16 `fileWriteAll(file, data)` call.
@@ -72,7 +74,9 @@ fn fileWriteAll(file: std.Io.File, data: []const u8) !void {
 fn fileReadAll(allocator: std.mem.Allocator, file: std.Io.File, max: usize) ![]u8 {
 	var buf: [4096]u8 = undefined;
 	var r = file.reader(testIo(), &buf);
-	return try r.interface.readAlloc(allocator, max);
+	// allocRemaining reports StreamTooLong once `limit` bytes are read without
+	// seeing EOF, so allow one extra byte: fail only if the file exceeds max.
+	return try r.interface.allocRemaining(allocator, .limited(max +| 1));
 }
 
 /// Lightweight $TMPDIR lookup via libc, returning an allocator-owned copy or null.
@@ -95,14 +99,17 @@ fn runChild(allocator: std.mem.Allocator, argv: []const []const u8) !std.process
 	return std.process.run(allocator, testIo(), .{ .argv = argv });
 }
 
+/// Interop tests need the reference tools; the dev shell and flake checks
+/// provide them, so a missing tool is a broken environment and must fail,
+/// not skip (a silent skip hid these tests for the whole Zig 0.16 migration).
 fn requireSystemBzip2(allocator: std.mem.Allocator) !void {
-	const result = runChild(allocator, &[_][]const u8{ "bzip2", "--help" }) catch return error.SkipZigTest;
+	const result = runChild(allocator, &[_][]const u8{ "bzip2", "--help" }) catch |err| return err;
 	defer allocator.free(result.stdout);
 	defer allocator.free(result.stderr);
 }
 
 fn requirePbzip2(allocator: std.mem.Allocator) !void {
-	const result = runChild(allocator, &[_][]const u8{ "pbzip2", "-h" }) catch return error.SkipZigTest;
+	const result = runChild(allocator, &[_][]const u8{ "pbzip2", "-h" }) catch |err| return err;
 	defer allocator.free(result.stdout);
 	defer allocator.free(result.stderr);
 }
@@ -748,7 +755,8 @@ test "interop pbzip2 multistream - pbzip2 compress, zig decompress" {
 			stream_count += 1;
 		}
 	}
-	if (stream_count < 2) return error.SkipZigTest;
+	// The test is about multi-stream input; a single stream would not exercise it.
+	try testing.expect(stream_count >= 2);
 
 	const decompressed = try bzip2.decompress(allocator, compressed);
 	defer allocator.free(decompressed);
@@ -823,7 +831,7 @@ test "regression: dolphin level-9 bz2 reproducer block2 (validate inbox 2026-04-
 	try requireSystemBzip2(allocator);
 
 	const repro_path = "tests/fixtures/repro_block2_dolphin.bz2";
-	const f = std.Io.Dir.cwd().openFile(testIo(), repro_path, .{}) catch return error.SkipZigTest;
+	const f = try std.Io.Dir.cwd().openFile(testIo(), repro_path, .{});
 	defer f.close(testIo());
 	const sz = (try f.stat(testIo())).size;
 	const compressed = try fileReadAll(allocator, f, @intCast(sz));
@@ -847,7 +855,7 @@ test "regression: dolphin level-9 bz2 reproducer block10 (validate inbox 2026-04
 	try requireSystemBzip2(allocator);
 
 	const repro_path = "tests/fixtures/repro_block10_dolphin.bz2";
-	const f = std.Io.Dir.cwd().openFile(testIo(), repro_path, .{}) catch return error.SkipZigTest;
+	const f = try std.Io.Dir.cwd().openFile(testIo(), repro_path, .{});
 	defer f.close(testIo());
 	const sz = (try f.stat(testIo())).size;
 	const compressed = try fileReadAll(allocator, f, @intCast(sz));
