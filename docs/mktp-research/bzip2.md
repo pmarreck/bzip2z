@@ -194,7 +194,8 @@ ReleaseSafe build and the sweep, and keeps their logs, the sweep report and
 stderr. It succeeds only when:
 
 - every stage exits 0, and the binary under test exists;
-- the report is JSON that matches the declared domain in
+- the report is exactly one JSON object (two concatenated objects, an
+  array or other root is rejected) and matches the declared domain in
   `tests/differential/sniper-domain.json` exactly: definition, classifier,
   trial count, and each corpus item's name, size, stride and sha256. The
   trial count must also equal the sum of ceil(bytes x 8 / stride) over the
@@ -202,6 +203,9 @@ stderr. It succeeds only when:
 - the reference binary exists and is executable;
 - every pristine control is accepted by both decoders, and no crash,
   experiment error or unexplained disagreement is reported;
+- all eight outcome counters are present and are nonnegative integers, and
+  the passing outcomes (both accept, both reject, intentional divergence)
+  sum exactly to the trial count;
 - the source revision is unchanged and the tree clean after all steps.
 
 It writes `status.json` with jq after every stage, atomically, with
@@ -215,10 +219,21 @@ found in the first version: an unwritable receipt, a non-JSON report, a
 wrong classifier or trial count, a missing binary, a quoted reference path
 that broke hand-written JSON, and a build step that moved HEAD. Also covered:
 an empty corpus, a failed pristine control, a nonzero failing-outcome count,
-a missing reference, and termination during the build. Five mutation checks
-were each caught by their control: an ignored test status, an accepted
-zero-trial report, a dropped classifier comparison, a disabled
-source-stability check, and dropped per-stage receipt writes.
+a missing reference, and termination during the build. A second independent
+review then found four more false successes. One was a report whose
+outcomes did not account for its trials. Another used a negative counter
+balanced by an inflated one. A third had missing success counters. The
+last held two JSON roots, a failing one first and a clean one last. Each
+now has a control, alongside fractional, string, array-root and
+missing-failure-counter cases and a whitespace-padded single-root
+positive. Seven mutation checks were each caught by their control:
+- an ignored test status
+- an accepted zero-trial report
+- a dropped classifier comparison
+- a disabled source-stability check
+- dropped per-stage receipt writes
+- a dropped partition check
+- a dropped counter-type check
 
 #### Classifier versions
 

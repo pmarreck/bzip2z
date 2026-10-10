@@ -25,7 +25,7 @@ JSON
 fake_sweep="$root/fake-sweep"
 cat > "$fake_sweep" <<'SWEEP'
 #!/usr/bin/env bash
-good='{"definition":"d1","classifier":"classifier/v2","reference":"r","corpus":[{"name":"c","bytes":3,"stride":1,"sha256":"aa","control":"accept/accept"}],"trials":24,"both_accept":1,"both_reject":4,"intentional_divergence":0,"experiment_error":0,"bzip2z_only_reject":0,"reference_only_reject":0,"bzip2z_crash":0,"reference_crash":0}'
+good='{"definition":"d1","classifier":"classifier/v2","reference":"r","corpus":[{"name":"c","bytes":3,"stride":1,"sha256":"aa","control":"accept/accept"}],"trials":24,"both_accept":1,"both_reject":23,"intentional_divergence":0,"experiment_error":0,"bzip2z_only_reject":0,"reference_only_reject":0,"bzip2z_crash":0,"reference_crash":0}'
 case "${FAKE_SWEEP:-good}" in
 	good) echo "$good" ;;
 	fail) echo "$good"; exit 1 ;;
@@ -37,6 +37,15 @@ case "${FAKE_SWEEP:-good}" in
 	other-corpus) echo "$good" | sed 's/"sha256":"aa"/"sha256":"bb"/' ;;
 	control-failed) echo "$good" | sed 's#accept/accept#accept/reject#' ;;
 	empty-corpus) echo "$good" | jq -c '.corpus = []' ;;
+	unreconciled) echo "$good" | jq -c '.both_reject = 0' ;;
+	negative) echo "$good" | jq -c '.both_accept = -1 | .both_reject = 25' ;;
+	fractional) echo "$good" | jq -c '.both_accept = 0.5 | .both_reject = 23.5' ;;
+	string-count) echo "$good" | jq -c '.both_accept = "1"' ;;
+	missing-counter) echo "$good" | jq -c 'del(.both_accept, .both_reject, .intentional_divergence)' ;;
+	missing-failure-counter) echo "$good" | jq -c 'del(.reference_crash)' ;;
+	two-roots) echo "$good" | jq -c '.experiment_error = 1'; echo "$good" ;;
+	array-root) echo "[$good]" ;;
+	whitespace) printf '\n  %s  \n\n' "$(echo "$good" | jq .)" ;;
 	failing-outcome) echo "$good" | sed 's/"bzip2z_crash":0/"bzip2z_crash":1/' ;;
 esac
 SWEEP
@@ -79,6 +88,15 @@ run control-failed no FAKE_SWEEP=control-failed
 run failing-outcome-count no FAKE_SWEEP=failing-outcome
 run empty-corpus no FAKE_SWEEP=empty-corpus
 run reference-missing no REPLAY_REFERENCE="$root/no-such-reference"
+run unreconciled-partition no FAKE_SWEEP=unreconciled
+run negative-counter no FAKE_SWEEP=negative
+run fractional-counter no FAKE_SWEEP=fractional
+run string-counter no FAKE_SWEEP=string-count
+run missing-success-counters no FAKE_SWEEP=missing-counter
+run missing-failure-counter no FAKE_SWEEP=missing-failure-counter
+run two-json-roots no FAKE_SWEEP=two-roots
+run array-root no FAKE_SWEEP=array-root
+run one-root-with-whitespace yes FAKE_SWEEP=whitespace
 run binary-missing no REPLAY_BIN="$repo/out/no-such-bin"
 run build-moves-head no REPLAY_BUILD_CMD="git -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved"
 mkdir -p "$root/state-status-unwritable/status.json"

@@ -85,16 +85,23 @@ elif [ ! -f "$bin" ]; then
 else
 	stage binary 0
 	bash -c "$sweep_cmd \"\$1\" \"\$2\"" sweep "$bin" "$reference" > "$report" 2> "$state/sweep.err"; stage sweep $?
-	# The report must be JSON matching the declared domain exactly, with every
-	# pristine control accepted by both sides and no failing outcome.
-	jq -e --slurpfile m "$domain" '
-		.definition == $m[0].definition and .classifier == $m[0].classifier
+	# The report must be exactly one JSON object matching the declared domain,
+	# with every pristine control accepted by both sides, every outcome counter
+	# a nonnegative integer, no failing outcome, and the passing outcomes
+	# partitioning the trials exactly.
+	jq -e -s --slurpfile m "$domain" '
+		length == 1 and (.[0] | type == "object") and (.[0] |
+		([.both_accept, .both_reject, .intentional_divergence, .experiment_error,
+		  .bzip2z_only_reject, .reference_only_reject, .bzip2z_crash, .reference_crash]
+		 | all(type == "number" and . >= 0 and . == floor))
+		and .both_accept + .both_reject + .intentional_divergence == .trials
+		and .definition == $m[0].definition and .classifier == $m[0].classifier
 		and .trials == $m[0].trials and .trials > 0
 		and .trials == ([.corpus[] | ((.bytes * 8 + .stride - 1) / .stride | floor)] | add)
 		and ([.corpus[] | {name, bytes, stride, sha256}] == [$m[0].corpus[] | {name, bytes, stride, sha256}])
 		and all(.corpus[]; .control == "accept/accept")
 		and .experiment_error == 0 and .bzip2z_only_reject == 0 and .reference_only_reject == 0
-		and .bzip2z_crash == 0 and .reference_crash == 0' "$report" >/dev/null 2>&1
+		and .bzip2z_crash == 0 and .reference_crash == 0)' "$report" >/dev/null 2>&1
 	stage report $?
 fi
 
