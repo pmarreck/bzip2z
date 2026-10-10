@@ -115,6 +115,49 @@ Test "differential: crafted structural cases agree with reference bzip2" in
 | Level digit `1` over a >100k-symbol block | reject | reject | reject |
 | Padding bits after the footer set to 1 | accept | accept | accept |
 
+### Randomized blocks and degenerate Huffman tables (in `./test`)
+
+Test "differential: randomized blocks and degenerate Huffman tables" in
+`src/bzip2.zig` decodes crafted streams with both bzip2z and `bzip2 -dc`.
+For each case it checks the verdict and the exact output bytes of each
+decoder against an expected result, and the SHA-256 of the crafted stream
+against a pinned value. A reference exit other than 0 or 2 is an experiment
+error, never a verdict.
+
+The expected verdicts come from the format description, not from either
+decoder. In the dsnet/compress `doc/bzip2-format.pdf` (sections 2.2.3.2.3 and
+appendix B examples), code lengths are 1 to 20 and assigned canonically. An
+incomplete or over-subscribed table is technically invalid, but a decoder
+fails only when the data uses a code the table leaves unassigned. Its
+worked examples assign the same codes as bzip2z's canonical construction.
+The document's appendix containing ported reference code was not read.
+
+| Case (alphabet RUNA, RUNB, MTF1, EOB; data "ab") | Expected | bzip2z | Reference |
+|---|---|---|---|
+| Encoder tables (control) | "ab" | "ab" | "ab" |
+| Lengths {3,3,1,2}, Kraft sum 1 | "ab" | "ab" | "ab" |
+| Lengths {2,2,1,1}, over-subscribed, used codes assigned | "ab" | "ab" | "ab" |
+| Lengths {3,3,1,3}, incomplete, used codes assigned | "ab" | "ab" | "ab" |
+| All lengths 20, incomplete | "ab" | "ab" | "ab" |
+| Lengths {3,3,1,3}, EOB sent as unassigned code 111 | reject | reject (HuffmanOverflow, phase symbol_data) | reject |
+| Randomized block, 2000 bytes | original bytes | wrong before fix | original bytes |
+| Randomized block, 300000 bytes (past the 512-entry table wrap) | original bytes | wrong before fix | original bytes |
+
+The Huffman cases found no disagreement. The randomized cases found a decoder
+bug. bzip2z toggled the first byte one position late, at index 618 instead
+of 617, and every later toggle inherited the offset. The bug went unnoticed
+because the only earlier test checked `derandomize` against positions derived
+from its own loop. Single-toggle black-box probes against the reference
+located its first two toggles at indexes 617 and 1337. Starting the counter
+at 1 fixes it. The 300000-byte case passes every toggle in the 512-entry table
+(sum 277732), and its block CRC checks each position against the reference.
+Before the fix the reference rejected both crafted streams (exit 2, CRC
+error) while bzip2z accepted them. A randomized stream from an old encoder
+would have decoded to wrong bytes and then failed bzip2z's block CRC check,
+so it was reported as corrupt (inferred from the CRC check; no real legacy
+randomized stream was tested).
+
+
 ### Sniper sweep against the reference (bounded campaign)
 
 `tests/differential/sniper-vs-reference BZIP2Z_BIN [REFERENCE_BIN]` flips one
@@ -318,11 +361,12 @@ test "differential: trailing garbage is an intentional, documented divergence".
 
 ## Limitations
 
-- Randomized blocks (deprecated; not produced by current encoders) are decoded
-  but have no crafted differential case.
-- Code-length sets that violate the Kraft inequality are not rejected when
-  the tables are built; damage there surfaces only as a decode error or CRC
-  mismatch. The reference's behavior for such tables was not tested.
+- Randomized blocks are checked by two crafted cases (one single block each);
+  no randomized multi-block or multi-stream input was crafted.
+- Code-length sets that violate the Kraft inequality are accepted when tables
+  are built, as in the reference; only an unassigned code in the data is
+  rejected. Five table shapes over a four-symbol alphabet were crafted; larger
+  alphabets and multiple distinct tables per block were not.
 - Diagnostics (`decompressStream`) cover the sequential decoder; the parallel
   slice decoder reports errors without locations.
 - The sniper sweep covers three small streams; it says nothing about shotgun

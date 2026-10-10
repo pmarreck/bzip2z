@@ -1094,7 +1094,9 @@ fn derandomize(data: []u8) void {
 	};
 
 	var rand_idx: usize = 0;
-	var count: usize = 0;
+	// The first toggle lands on index rand_nums[0] - 2 and later ones every
+	// rand_nums[i] bytes, matching reference bzip2 (black-box probes: 617, 1337).
+	var count: usize = 1;
 
 	for (data) |*byte| {
 		count += 1;
@@ -2258,6 +2260,9 @@ const BlockPrepared = struct {
 	/// to 32767; real encoders write exactly ceil(symbols / 50), so this stays
 	/// 0 except in tests that build legal over-long selector lists.
 	extra_selectors: usize = 0,
+	/// Legacy randomized-block flag. Encoders leave it 0; tests set it to
+	/// build randomized blocks for the decoder.
+	randomized: bool = false,
 
 	pub fn deinit(self: *BlockPrepared, allocator: Allocator) void {
 		allocator.free(self.symbols);
@@ -2418,7 +2423,7 @@ fn writeBlock(bits: anytype, block: *const BlockPrepared) !void {
 	try bits.writeBits(@truncate(BLOCK_MAGIC >> 24), 24);
 	try bits.writeBits(@truncate(BLOCK_MAGIC & 0xFFFFFF), 24);
 	try bits.writeBits(block.crc, 32);
-	try bits.writeBit(0);
+	try bits.writeBit(@intFromBool(block.randomized));
 	try bits.writeBits(block.primary_index, 24);
 
 	var group_bitmap: u16 = 0;
@@ -3525,9 +3530,9 @@ test "derandomize compatibility sequence reaches legacy 129th toggle point" {
 	derandomize(data);
 
 	// A 128-entry table would wrap and flip here (wrong for legacy streams).
-	try std.testing.expectEqual(@as(u8, 0), data[70148]);
+	try std.testing.expectEqual(@as(u8, 0), data[70147]);
 	// The 129th toggle for the canonical sequence lands here.
-	try std.testing.expectEqual(@as(u8, 1), data[70440]);
+	try std.testing.expectEqual(@as(u8, 1), data[70439]);
 }
 
 // ============ SA-IS Algorithm Unit Tests ============
@@ -4564,12 +4569,22 @@ const CraftOptions = struct {
 	/// Stored block (and so stream) CRC; null keeps the encoder's CRC for "ab".
 	crc: ?u32 = null,
 	primary_index: ?u32 = null,
+	/// Bytes fed to the block encoder (before any crafting).
+	input: []const u8 = "ab",
+	/// Set the block's randomized bit (the input must already be randomized).
+	randomized: bool = false,
+	/// Code lengths for every symbol of the alphabet, written to both tables;
+	/// codes are reassigned canonically, so the set may break Kraft equality.
+	lengths: ?[]const u8 = null,
+	/// Replace one symbol's emitted code (same length), e.g. with a code the
+	/// table leaves unassigned.
+	code_override: ?struct { sym: u16, code: u32 } = null,
 };
 
 /// Craft a single-block stream with chosen header fields and symbol sequence
 /// (EOB appended), so tests can feed decoders shapes a real encoder never emits.
 fn craftStream(allocator: Allocator, opts: CraftOptions) ![]u8 {
-	var block = try prepareBlock(allocator, "ab");
+	var block = try prepareBlock(allocator, opts.input);
 	defer block.deinit(allocator);
 
 	if (opts.empty_symbol_map) {
@@ -4594,6 +4609,18 @@ fn craftStream(allocator: Allocator, opts: CraftOptions) ![]u8 {
 	block.extra_selectors = opts.extra_selectors;
 	if (opts.crc) |crc| block.crc = crc;
 	if (opts.primary_index) |p| block.primary_index = p;
+	block.randomized = opts.randomized;
+	if (opts.lengths) |lengths| {
+		if (lengths.len != block.alpha_size) return error.CraftedLengthsMismatch;
+		@memcpy(block.lengths[0..lengths.len], lengths);
+		block.codes = buildHuffmanCodes(&block.lengths, block.alpha_size);
+		// A crafted table may leave some symbols without a code that fits
+		// their length (over-subscription); the stream must not use them.
+		for (block.symbols) |sym| {
+			if (block.codes[sym] >> @intCast(block.lengths[sym]) != 0) return error.CraftedSymbolHasNoCode;
+		}
+	}
+	if (opts.code_override) |o| block.codes[o.sym] = o.code;
 
 	var output: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer output.deinit(allocator);
@@ -5236,6 +5263,121 @@ test "over-long selector list (18010 > 18002) decodes to the original bytes" {
 	try std.testing.expectEqualSlices(u8, "ab", out);
 }
 
+
+/// Run reference `bzip2 -dc` on `bytes`; returns its stdout when it exits 0,
+/// null when it exits 2 (corrupt input), and an error for any other outcome.
+fn referenceDecode(allocator: Allocator, bytes: []const u8) !?[]u8 {
+	var tmp = std.testing.tmpDir(.{});
+	defer tmp.cleanup();
+	try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.bz2", .data = bytes });
+	const result = try std.process.run(allocator, std.testing.io, .{
+		.argv = &.{ "bzip2", "-dc", "in.bz2" },
+		.cwd = .{ .dir = tmp.dir },
+	});
+	defer allocator.free(result.stderr);
+	const code = switch (result.term) {
+		.exited => |c| c,
+		else => {
+			allocator.free(result.stdout);
+			return error.ReferenceDidNotExit;
+		},
+	};
+	if (try verdictFromReferenceExit(code)) return result.stdout;
+	allocator.free(result.stdout);
+	return null;
+}
+
+/// Bytes with no run of 4+ equal bytes, before or after randomization, so the
+/// encoder's RLE1 leaves them unchanged and the BWT input is exactly the
+/// randomized sequence.
+fn randomizedProbeInput(allocator: Allocator, len: usize) ![]u8 {
+	const data = try allocator.alloc(u8, len);
+	for (data, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i * 7 % 26));
+	return data;
+}
+
+test "differential: randomized blocks and degenerate Huffman tables (crafted, black-box reference)" {
+	// Expected verdicts come from the format description (dsnet/compress
+	// doc/bzip2-format.pdf, 2.2.3.2.3 and appendix B examples): code lengths are
+	// 1..20 and canonical; incomplete or over-subscribed tables are technically
+	// invalid, but decoding fails only when the data uses a code the table does
+	// not assign. Reference bzip2 is checked against the same expectations
+	// separately, so a reference/specification disagreement also fails.
+	const allocator = std.testing.allocator;
+
+	const plain = try randomizedProbeInput(allocator, 2000);
+	defer allocator.free(plain);
+	// The decoder derandomizes the inverse-BWT output, so the encoder must see
+	// the randomized bytes (derandomize is its own inverse) and the CRC of `plain`.
+	const randomized = try allocator.dupe(u8, plain);
+	defer allocator.free(randomized);
+	derandomize(randomized);
+	try std.testing.expect(!std.mem.eql(u8, plain, randomized));
+	var plain_crc = Crc32Bzip2.init();
+	plain_crc.updateSlice(plain);
+
+	// Long enough to pass the 512-entry wrap of the toggle table, so the block
+	// CRC checks every toggle position against the reference.
+	const long_plain = try randomizedProbeInput(allocator, 300_000);
+	defer allocator.free(long_plain);
+	const long_randomized = try allocator.dupe(u8, long_plain);
+	defer allocator.free(long_randomized);
+	derandomize(long_randomized);
+	var long_crc = Crc32Bzip2.init();
+	long_crc.updateSlice(long_plain);
+
+	// "ab" encodes as alphabet {RUNA, RUNB, MTF1, EOB} with symbols MTF1 MTF1 EOB.
+	const unassigned_eob: u32 = 0b111; // free code of lengths {3,3,1,3}
+	const Case = struct { name: []const u8, opts: CraftOptions, expect: ?[]const u8, sha256: *const [64]u8 };
+	const cases = [_]Case{
+		.{ .name = "control: encoder tables", .opts = .{}, .expect = "ab", .sha256 = "2e6497648da630aa1f48f04a141204c3904f28c583132ad18a00a6decb9f936b" },
+		.{ .name = "Kraft-exact lengths {3,3,1,2}", .opts = .{ .lengths = &.{ 3, 3, 1, 2 } }, .expect = "ab", .sha256 = "7a306a4c251a5a669e629d2b88c37fd3f8d3589717387375e167439d0956f5c2" },
+		.{ .name = "over-subscribed {2,2,1,1}, used codes assigned", .opts = .{ .lengths = &.{ 2, 2, 1, 1 } }, .expect = "ab", .sha256 = "c179ead9f8f93691198da58fed316f9c49dba306b93a13b0d99220cabb812e15" },
+		.{ .name = "incomplete {3,3,1,3}, used codes assigned", .opts = .{ .lengths = &.{ 3, 3, 1, 3 } }, .expect = "ab", .sha256 = "607675d84f1912a663290dd706843b0c8ab79cd07e20b42c26b87dd053d12f0d" },
+		.{ .name = "all lengths 20 (incomplete)", .opts = .{ .lengths = &.{ 20, 20, 20, 20 } }, .expect = "ab", .sha256 = "4ab124618ac521bb948851245046788eebc04d7d3dcf0ecf7e9fdddda20ecb46" },
+		.{ .name = "incomplete {3,3,1,3}, EOB sent as unassigned 111", .opts = .{ .lengths = &.{ 3, 3, 1, 3 }, .code_override = .{ .sym = 3, .code = unassigned_eob } }, .expect = null, .sha256 = "ec615886d401f05fccde62469b12f715617493ac5b693892094495beb87eaa02" },
+		.{ .name = "randomized block, 2000 bytes", .opts = .{ .input = randomized, .randomized = true, .crc = plain_crc.final() }, .expect = plain, .sha256 = "d5011f0bf53f4bedff13b8c7f2b9b015616a7df1b316c7d811c0bda74e1fe7e6" },
+		.{ .name = "randomized block, 300000 bytes (past table wrap)", .opts = .{ .input = long_randomized, .randomized = true, .crc = long_crc.final() }, .expect = long_plain, .sha256 = "3c52165aa8db3316a86421d869510aabf8af26ba5e394bd8d244f39c006f8139" },
+	};
+
+	var failures: usize = 0;
+	for (cases) |c| {
+		const stream = try craftStream(allocator, c.opts);
+		defer allocator.free(stream);
+
+		const ours: ?[]u8 = decompress(allocator, stream) catch null;
+		defer if (ours) |o| allocator.free(o);
+		const ref = try referenceDecode(allocator, stream);
+		defer if (ref) |r| allocator.free(r);
+
+		const ours_ok = if (c.expect) |e| (ours != null and std.mem.eql(u8, e, ours.?)) else ours == null;
+		const ref_ok = if (c.expect) |e| (ref != null and std.mem.eql(u8, e, ref.?)) else ref == null;
+		if (!ours_ok or !ref_ok) {
+			failures += 1;
+			std.debug.print("FAIL {s}: bzip2z {s}, reference {s}\n", .{ c.name, if (ours_ok) "ok" else "WRONG", if (ref_ok) "ok" else "WRONG" });
+		}
+		// Exact crafted bytes are part of the evidence; any drift must be deliberate.
+		var digest: [32]u8 = undefined;
+		std.crypto.hash.sha2.Sha256.hash(stream, &digest, .{});
+		const hex = std.fmt.bytesToHex(digest, .lower);
+		if (!std.mem.eql(u8, c.sha256, &hex)) {
+			failures += 1;
+			std.debug.print("FAIL {s}: crafted bytes changed, sha256 {s}\n", .{ c.name, &hex });
+		}
+	}
+	try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+test "unassigned Huffman code is reported in symbol_data" {
+	const allocator = std.testing.allocator;
+	const stream = try craftStream(allocator, .{ .lengths = &.{ 3, 3, 1, 3 }, .code_override = .{ .sym = 3, .code = 0b111 } });
+	defer allocator.free(stream);
+	var reader: std.Io.Reader = .fixed(stream);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	try std.testing.expectError(Error.HuffmanOverflow, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectEqual(Diagnostics.Phase.symbol_data, diag.phase);
+}
 test "empty input round-trips without emitting an empty block" {
 	const allocator = std.testing.allocator;
 	const stream = try compress(allocator, "");
