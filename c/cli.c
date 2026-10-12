@@ -184,6 +184,32 @@ static const char* status_name(int status) {
 	}
 }
 
+/* Print one error line for LABEL: the status, and when the library filled in
+ * a diagnostics report, where the error was detected and which input bytes
+ * hold the damage (bit offsets are MSB-first, so bit 0 is the 0x80 bit). */
+static void print_failure(const char* label, int status, const bzip2z_diagnostics_t* diag) {
+	fprintf(stderr, "%s: %s", label, status_name(status));
+	if (diag != NULL && diag->valid) {
+		size_t phase_len = 0;
+		const char* phase = bzip2z_phase_name(diag->phase, &phase_len);
+		if (phase == NULL) {
+			phase = "unknown";
+			phase_len = strlen(phase);
+		}
+		fprintf(stderr, " at byte %llu bit %u (stream %u, block %u, phase %.*s)",
+			(unsigned long long)(diag->bit_offset / 8), (unsigned)(diag->bit_offset % 8),
+			(unsigned)diag->stream_index, (unsigned)diag->block_index, (int)phase_len, phase);
+		if (diag->has_crc) {
+			fprintf(stderr, "; stored CRC 0x%08x, computed 0x%08x",
+				(unsigned)diag->stored_crc, (unsigned)diag->computed_crc);
+		}
+		uint64_t last = diag->bit_offset > diag->window_start_bit ? (diag->bit_offset - 1) / 8 : diag->window_start_bit / 8;
+		fprintf(stderr, "; damage within bytes %llu..%llu",
+			(unsigned long long)(diag->window_start_bit / 8), (unsigned long long)last);
+	}
+	fputc('\n', stderr);
+}
+
 static int parse_size(const char* text, size_t* value_out) {
 	char* end = NULL;
 	unsigned long long parsed = strtoull(text, &end, 10);
@@ -591,7 +617,7 @@ static int compress_file(const char* path, const cli_options_t* opts) {
 	return 0;
 }
 
-static int decompress_file(const char* path, const cli_options_t* opts) {
+static int decompress_file(const char* path, const cli_options_t* opts, bzip2z_diagnostics_t* diag) {
 	uint8_t* input = NULL;
 	size_t input_len = 0;
 	bzip2z_buffer_t out = {0};
@@ -611,6 +637,7 @@ static int decompress_file(const char* path, const cli_options_t* opts) {
 	dopt.on_progress = pctx ? progress_callback : NULL;
 	dopt.progress_userdata = pctx;
 	dopt.progress_bytes_total = (uint64_t)input_len;
+	dopt.diagnostics = diag;
 	status = bzip2z_decompress(input, input_len, &dopt, &out);
 
 	free(input);
@@ -656,7 +683,7 @@ static int decompress_file(const char* path, const cli_options_t* opts) {
 	return 0;
 }
 
-static int test_file(const char* path, const cli_options_t* opts) {
+static int test_file(const char* path, const cli_options_t* opts, bzip2z_diagnostics_t* diag) {
 	uint8_t* input = NULL;
 	size_t input_len = 0;
 	bzip2z_buffer_t out = {0};
@@ -675,6 +702,7 @@ static int test_file(const char* path, const cli_options_t* opts) {
 	dopt.on_progress = pctx ? progress_callback : NULL;
 	dopt.progress_userdata = pctx;
 	dopt.progress_bytes_total = (uint64_t)input_len;
+	dopt.diagnostics = diag;
 	status = bzip2z_decompress(input, input_len, &dopt, &out);
 
 	free(input);
@@ -693,6 +721,7 @@ static int process_stdin(const cli_options_t* opts) {
 	size_t input_len = 0;
 	bzip2z_buffer_t out = {0};
 	int status;
+	bzip2z_diagnostics_t diag = {0};
 
 	if (!read_stream(stdin, &input, &input_len)) {
 		return 1;
@@ -723,6 +752,7 @@ static int process_stdin(const cli_options_t* opts) {
 		dopt.on_progress = pctx ? progress_callback : NULL;
 		dopt.progress_userdata = pctx;
 		dopt.progress_bytes_total = opts->stdin_size > 0 ? opts->stdin_size : (uint64_t)input_len;
+		dopt.diagnostics = &diag;
 		status = bzip2z_decompress(input, input_len, &dopt, &out);
 	}
 	free(input);
@@ -730,7 +760,7 @@ static int process_stdin(const cli_options_t* opts) {
 
 	if (status != BZIP2Z_OK) {
 		if (!opts->quiet) {
-			fprintf(stderr, "bzip2z: %s\n", status_name(status));
+			print_failure("bzip2z", status, &diag);
 		}
 		return 1;
 	}
@@ -820,16 +850,17 @@ int main(int argc, char** argv) {
 	for (idx = 0; idx < files.len; idx++) {
 		const char* path = files.items[idx];
 		int rc;
+		bzip2z_diagnostics_t diag = {0};
 		switch (opts.mode) {
 			case MODE_COMPRESS:
 				rc = compress_file(path, &opts);
 				break;
 			case MODE_DECOMPRESS:
-				rc = decompress_file(path, &opts);
+				rc = decompress_file(path, &opts, &diag);
 				break;
 			case MODE_TEST:
 			default:
-				rc = test_file(path, &opts);
+				rc = test_file(path, &opts, &diag);
 				break;
 		}
 
@@ -847,7 +878,7 @@ int main(int argc, char** argv) {
 			} else if (rc < 0) {
 				fprintf(stderr, "%s: %s\n", path, strerror(errno));
 			} else {
-				fprintf(stderr, "%s: %s\n", path, status_name(rc));
+				print_failure(path, rc, &diag);
 			}
 		}
 	}

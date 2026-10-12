@@ -126,8 +126,24 @@ pub fn build(b: *std.Build) void {
 	// bakes into libc-linked executables does not exist).
 	const test_exec = b.option([]const u8, "test-exec", "Program that runs each test binary (e.g. a dynamic loader)");
 
+	// Tests run from a module of their own: the library sources plus the
+	// translated public C header, so the C ABI adapter's tests (src/ffi.zig,
+	// reached from lib.zig's test block) can check the header's layout against
+	// the Zig declarations. The installed library never depends on translate-c.
+	const header = b.addTranslateC(.{
+		.root_source_file = b.path("c/include/bzip2z.h"),
+		.target = target,
+		.optimize = optimize,
+	});
+	const lib_test_mod = b.createModule(.{
+		.root_source_file = b.path("src/lib.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+		.imports = &.{.{ .name = "bzip2z_h", .module = header.createModule() }},
+	});
 	const lib_tests = b.addTest(.{
-		.root_module = lib_mod,
+		.root_module = lib_test_mod,
 		.filters = test_filters,
 	});
 	if (test_exec) |exec| lib_tests.setExecCmd(&.{ exec, null });

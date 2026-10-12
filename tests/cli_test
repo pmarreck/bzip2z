@@ -241,6 +241,40 @@ big_out="$work_dir/big.out"
 [ -s "$work_dir/big.err" ] && fail "parallel decompress wrote to stderr: $(cat "$work_dir/big.err")"
 diff -u "$big_orig" "$big_out" >/dev/null || fail "parallel stdout decompression mismatch"
 
+# Diagnostics in the error message. Oracle: we know which byte we damaged, so
+# the reported damage range must contain it, on the sequential, parallel and
+# stdin paths. The byte sits two thirds in, past the first block, so the
+# range must also start after byte 0.
+damaged="$work_dir/damaged.bz2"
+cp "$big_src.bz2" "$damaged" || die "cannot copy compressed input"
+size=$(wc -c <"$damaged") || die "cannot measure $damaged"
+off=$((size * 2 / 3))
+orig_byte=$(od -An -tu1 -j "$off" -N1 "$damaged" | tr -d ' ')
+printf "$(printf '\\%03o' $((orig_byte ^ 255)))" | dd of="$damaged" bs=1 seek="$off" conv=notrunc status=none || die "cannot damage $damaged"
+
+diag_re='(INVALID_DATA|CRC_MISMATCH) at byte ([0-9]+) bit ([0-7]) \(stream ([0-9]+), block ([0-9]+), phase ([a-z_]+)\)(; stored CRC 0x[0-9a-f]{8}, computed 0x[0-9a-f]{8})?; damage within bytes ([0-9]+)\.\.([0-9]+)$'
+check_diag() {
+	local label="$1"
+	if [ "$rc" -ne 1 ]; then
+		fail "$label: damaged input exited $rc"
+		return
+	fi
+	if [[ ! "$err" =~ $diag_re ]]; then
+		fail "$label: no diagnostics in: $err"
+		return
+	fi
+	local at="${BASH_REMATCH[2]}" from="${BASH_REMATCH[8]}" to="${BASH_REMATCH[9]}"
+	[ "$from" -le "$off" ] && [ "$off" -le "$to" ] || fail "$label: damaged byte $off outside reported range $from..$to"
+	[ "$from" -gt 0 ] || fail "$label: damage range starts at byte 0 for damage past the first block"
+	[ "$at" -ge "$to" ] || fail "$label: detection byte $at precedes range end $to"
+}
+capture "$cli" -t "$damaged"
+check_diag "sequential -t"
+capture "$cli" -j 2 -t "$damaged"
+check_diag "parallel -t"
+capture bash -c '"$1" -t <"$2"' _ "$cli" "$damaged"
+check_diag "stdin -t"
+
 if [ "$failures" -ne 0 ]; then
 	echo "cli_test: $failures failure(s)" >&2
 	exit 1

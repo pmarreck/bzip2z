@@ -22,3 +22,20 @@ pub fn decompress(allocator: std.mem.Allocator, input: []const u8, options: Deco
 pub fn decompressNoCrc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 	return bzip2.decompressNoCrc(allocator, input);
 }
+
+pub const Diagnostics = bzip2.Diagnostics;
+
+/// Locates the first failure in a stream for error reporting: decodes
+/// sequentially with every CRC checked, discarding output, and returns the
+/// streaming decoder's Diagnostics (failure phase, bit offset, damage window).
+/// Returns null when the input decodes cleanly or memory runs out.
+pub fn diagnose(allocator: std.mem.Allocator, input: []const u8) ?Diagnostics {
+	var reader: std.Io.Reader = .fixed(input);
+	var discard: std.Io.Writer.Discarding = .init(&.{});
+	var diag: Diagnostics = .{};
+	bzip2.decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }) catch |err| switch (err) {
+		error.OutOfMemory => return null,
+		else => return diag,
+	};
+	return null;
+}

@@ -24,6 +24,7 @@ test "version" {
 
 test {
 	_ = @import("bzip2_test.zig");
+	_ = @import("ffi.zig");
 	_ = bzip2;
 	_ = core;
 }

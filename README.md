@@ -375,6 +375,27 @@ the block being decoded. `[window_start_bit, bit_offset)` is the guaranteed
 bracket: it starts at the last CRC-verified block, because a CRC covers decoded
 bytes, not bit layout. `stored_crc`/`computed_crc` are set on CRC mismatches.
 
+From C, pass a `bzip2z_diagnostics_t` in the decompress options. It is filled
+only when a CRC-checked decode fails as `BZIP2Z_INVALID_DATA` or
+`BZIP2Z_CRC_MISMATCH` (`valid` is 1); the report comes from a sequential re-decode
+that runs only after a failure, so a successful parallel decode keeps its speed.
+`bzip2z_phase_name` returns a phase's name as a pointer plus a byte length.
+
+```c
+bzip2z_diagnostics_t diag;
+bzip2z_decompress_options_t opts = {0};
+opts.check_crc = 1;
+opts.diagnostics = &diag;
+int status = bzip2z_decompress(data, len, &opts, &out);
+if (status != BZIP2Z_OK && diag.valid) {
+	size_t name_len;
+	const char *phase = bzip2z_phase_name(diag.phase, &name_len);
+	printf("%.*s at byte %llu; damage from byte %llu\n", (int)name_len, phase,
+		(unsigned long long)(diag.bit_offset / 8),
+		(unsigned long long)(diag.window_start_bit / 8));
+}
+```
+
 ## CLI usage
 
 ```
@@ -387,6 +408,18 @@ bytes, not bit layout. `stored_crc`/`computed_crc` are set on CRC mismatches.
 ```
 
 `-j N` opts into pbzip2-style concatenated streams for compression and enables parallel decompression for file inputs.
+
+When decompressing or testing fails, the error line says where. One damaged byte
+in a 2 MB file gives:
+
+```
+damaged.bz2: CRC_MISMATCH at byte 1805570 bit 7 (stream 0, block 1, phase block_crc); stored CRC 0x187eb629, computed 0x5ad6ca01; damage within bytes 4..1805570
+```
+
+The damage lies within the reported byte range. Detection can come well after
+the damage (here, at the end of the block whose CRC failed), and the range starts
+at the beginning of the last block whose CRC verified (a CRC covers decoded
+bytes, not bit layout, so that block can still hold the damage).
 
 ### Progress display
 
