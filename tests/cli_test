@@ -164,7 +164,11 @@ command -v bzip2 >/dev/null 2>&1 || die "reference bzip2 not found in PATH"
 # would call `nix build` recursively, which either fails or overwrites the
 # wrapped binaries with raw ELFs that lack a usable dynamic interpreter.
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
-	"$build_cmd" >/dev/null || die "build failed"
+	build_log="$work_dir/build.log"
+	if ! "$build_cmd" >"$build_log" 2>&1; then
+		cat "$build_log" >&2
+		die "build failed"
+	fi
 fi
 
 bin_dir="$root_dir/zig-out/bin"
@@ -183,34 +187,41 @@ rc=0
 # about flag
 capture "$cli" --about
 [ "$rc" -eq 0 ] || fail "--about exited $rc"
+[ -z "$err" ] || fail "--about wrote to stderr: $err"
 
 # compress file
 capture "$cli" -k "$work_dir/sample.txt"
 [ "$rc" -eq 0 ] || fail "compress exited $rc"
+[ -z "$err" ] || fail "compress wrote to stderr: $err"
 [ -f "$work_dir/sample.txt.bz2" ] || fail "compressed file missing"
 
 # test integrity
 capture "$cli" -t "$work_dir/sample.txt.bz2"
 [ "$rc" -eq 0 ] || fail "test mode exited $rc"
+[ -z "$err" ] || fail "test mode wrote to stderr: $err"
 
 # decompress to stdout
 capture "$cli" -dc "$work_dir/sample.txt.bz2"
 [ "$rc" -eq 0 ] || fail "decompress to stdout exited $rc"
+[ -z "$err" ] || fail "decompress to stdout wrote to stderr: $err"
 diff -u "$work_dir/sample.txt" <(printf '%s' "$out") >/dev/null || fail "stdout decompression mismatch"
 
 # round-trip with system bzip2
 capture bzip2 -k -f "$work_dir/sample.txt"
 [ "$rc" -eq 0 ] || fail "system bzip2 exited $rc"
+[ -z "$err" ] || fail "system bzip2 wrote to stderr: $err"
 
 rm -f "$work_dir/sample.txt"
 
 capture "$cli" -dk "$work_dir/sample.txt.bz2"
 [ "$rc" -eq 0 ] || fail "zig bzip2 decompress exited $rc"
+[ -z "$err" ] || fail "zig bzip2 decompress wrote to stderr: $err"
 diff -u "$work_dir/sample.orig" "$work_dir/sample.txt" >/dev/null || fail "round-trip mismatch"
 
 # bzcat binary
 capture "$bin_dir/bzcatz" "$work_dir/sample.txt.bz2"
 [ "$rc" -eq 0 ] || fail "bzcat exited $rc"
+[ -z "$err" ] || fail "bzcat wrote to stderr: $err"
 diff -u "$work_dir/sample.orig" <(printf '%s' "$out") >/dev/null || fail "bzcat output mismatch"
 
 # -j parallel multi-stream (round-trip, stdout)
@@ -221,10 +232,12 @@ cp "$big_src" "$big_orig" || die "cannot copy random input"
 
 capture "$cli" -j 2 -k "$big_src"
 [ "$rc" -eq 0 ] || fail "parallel compress exited $rc"
+[ -z "$err" ] || fail "parallel compress wrote to stderr: $err"
 [ -f "$big_src.bz2" ] || fail "parallel compressed file missing"
 
 big_out="$work_dir/big.out"
-"$cli" -j 2 -dc "$big_src.bz2" >"$big_out" || fail "parallel decompress to stdout failed"
+"$cli" -j 2 -dc "$big_src.bz2" >"$big_out" 2>"$work_dir/big.err" || fail "parallel decompress to stdout failed"
+[ -s "$work_dir/big.err" ] && fail "parallel decompress wrote to stderr: $(cat "$work_dir/big.err")"
 diff -u "$big_orig" "$big_out" >/dev/null || fail "parallel stdout decompression mismatch"
 
 if [ "$failures" -ne 0 ]; then

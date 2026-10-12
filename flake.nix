@@ -105,7 +105,6 @@ exec "$DL_PATH" --argv0 "\$name" "\$(dirname "\$0")/\$name.real" "\$@"
 WRAPPER
 							chmod +x "$orig"
 						done
-						ls -la zig-out/bin/
 						BZIP2Z_TEST_EXEC="$DL_PATH" SKIP_BUILD=1 ./test
 						''}
 						${pkgs.lib.optionalString (!pkgs.stdenv.hostPlatform.isLinux) ''
