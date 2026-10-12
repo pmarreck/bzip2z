@@ -42,7 +42,7 @@
 
 			mkCiPackage = pkgs: zig: name: zigTarget: runTests:
 				let
-					isDarwin = pkgs.stdenv.isDarwin;
+					isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
 					zigDeps = mkZigDeps pkgs zig;
 				in
 				pkgs.stdenv.mkDerivation {
@@ -83,7 +83,7 @@
 						# breaks shared-lib subcompilation. Instead, test binaries run
 						# through Nix's loader (BZIP2Z_TEST_EXEC) and the CLI binaries
 						# get thin shell wrappers so tests/cli_test works unchanged.
-						${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+						${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
 						zig build
 						DL_PATH="$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)"
 						patchShebangs build test tests
@@ -108,7 +108,7 @@ WRAPPER
 						ls -la zig-out/bin/
 						BZIP2Z_TEST_EXEC="$DL_PATH" SKIP_BUILD=1 ./test
 						''}
-						${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) ''
+						${pkgs.lib.optionalString (!pkgs.stdenv.hostPlatform.isLinux) ''
 						zig build
 						patchShebangs build test tests
 						SKIP_BUILD=1 ./test
