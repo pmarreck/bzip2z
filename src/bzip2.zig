@@ -227,13 +227,6 @@ fn readAny(reader: anytype, buffer: []u8) anyerror!usize {
 	@compileError("reader type lacks read methods");
 }
 
-fn readByteAny(reader: anytype) anyerror!u8 {
-	var buf: [1]u8 = undefined;
-	const n = try readAny(reader, &buf);
-	if (n == 0) return error.EndOfStream;
-	return buf[0];
-}
-
 fn encodedLenForRun(run_len: usize) usize {
 	if (run_len == 0) return 0;
 	if (run_len >= 4) return 5;
@@ -242,7 +235,15 @@ fn encodedLenForRun(run_len: usize) usize {
 
 // ============ Bit Reader (Generic) ============
 
-/// Generic bit reader that reads bits MSB first (bzip2 convention)
+/// Bytes pulled from the source per refill. A `read`-style source (an
+/// unbuffered file handle) then costs one call per refill instead of per byte.
+const BIT_READER_REFILL_BYTES = 4096;
+
+/// Generic bit reader that reads bits MSB first (bzip2 convention). Source
+/// bytes are fetched in chunks into `pending`; `bytes_read` counts only bytes
+/// moved into the bit buffer, so `bitPosition` stays exact while the source
+/// runs ahead (decoding consumes the source to EOF anyway, to look for a
+/// concatenated stream).
 pub fn BitReader(comptime ReaderType: type) type {
 	return struct {
 		const Self = @This();
@@ -251,6 +252,9 @@ pub fn BitReader(comptime ReaderType: type) type {
 		buffer: u64, // Use u64 to handle up to 32 bit reads
 		bits_in_buffer: u6, // u6 can hold 0-63
 		bytes_read: u64,
+		pending: [BIT_READER_REFILL_BYTES]u8 = undefined,
+		pending_pos: usize = 0,
+		pending_len: usize = 0,
 
 		pub fn init(reader: ReaderType) Self {
 			return .{
@@ -266,18 +270,25 @@ pub fn BitReader(comptime ReaderType: type) type {
 			return self.bytes_read * 8 - self.bits_in_buffer;
 		}
 
-		/// Read n bits (up to 32) from the stream
-		pub fn readBits(self: *Self, comptime n: u6) Error!u32 {
-			// Ensure we have enough bits
+		/// Shift whole bytes into the bit buffer until it holds at least n bits.
+		inline fn fill(self: *Self, n: u6) Error!void {
 			while (self.bits_in_buffer < n) {
-				const byte = readByteAny(self.reader) catch |err| {
-					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.ReadFailed;
-				};
+				if (self.pending_pos == self.pending_len) {
+					const got = readAny(self.reader, &self.pending) catch return Error.ReadFailed;
+					if (got == 0) return Error.UnexpectedEof;
+					self.pending_pos = 0;
+					self.pending_len = got;
+				}
+				self.buffer = (self.buffer << 8) | self.pending[self.pending_pos];
+				self.pending_pos += 1;
 				self.bytes_read += 1;
-				self.buffer = (self.buffer << 8) | byte;
 				self.bits_in_buffer += 8;
 			}
+		}
+
+		/// Read n bits (up to 32) from the stream
+		pub fn readBits(self: *Self, comptime n: u6) Error!u32 {
+			try self.fill(n);
 
 			self.bits_in_buffer -= n;
 			const shift: u6 = self.bits_in_buffer;
@@ -287,16 +298,7 @@ pub fn BitReader(comptime ReaderType: type) type {
 
 		/// Read a variable number of bits (up to 32)
 		pub fn readBitsVar(self: *Self, n: u6) Error!u32 {
-			// Ensure we have enough bits
-			while (self.bits_in_buffer < n) {
-				const byte = readByteAny(self.reader) catch |err| {
-					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.ReadFailed;
-				};
-				self.bytes_read += 1;
-				self.buffer = (self.buffer << 8) | byte;
-				self.bits_in_buffer += 8;
-			}
+			try self.fill(n);
 
 			self.bits_in_buffer -= n;
 			const shift: u6 = self.bits_in_buffer;
@@ -318,15 +320,7 @@ pub fn BitReader(comptime ReaderType: type) type {
 
 		/// Peek at next n bits without consuming them (n must be <= 32)
 		pub fn peekBits(self: *Self, n: u6) Error!u32 {
-			while (self.bits_in_buffer < n) {
-				const byte = readByteAny(self.reader) catch |err| {
-					if (err == error.EndOfStream) return Error.UnexpectedEof;
-					return Error.ReadFailed;
-				};
-				self.bytes_read += 1;
-				self.buffer = (self.buffer << 8) | byte;
-				self.bits_in_buffer += 8;
-			}
+			try self.fill(n);
 			const shift: u6 = self.bits_in_buffer - n;
 			const mask: u64 = (@as(u64, 1) << n) - 1;
 			return @truncate((self.buffer >> shift) & mask);
@@ -4973,6 +4967,39 @@ test "decompressStream: works with a plain read()-style reader (FileSource shape
 	defer out.deinit();
 	try decompressStream(allocator, &src, &out.writer, .{});
 	try std.testing.expectEqualSlices(u8, data, out.written());
+}
+
+/// `read`-style source that records how often and how much it is asked for,
+/// standing in for an unbuffered file handle where each call is a syscall.
+const CountingReader = struct {
+	data: []const u8,
+	pos: usize = 0,
+	calls: usize = 0,
+	pub fn read(self: *CountingReader, dest: []u8) error{}!usize {
+		self.calls += 1;
+		const n = @min(dest.len, self.data.len - self.pos);
+		@memcpy(dest[0..n], self.data[self.pos..][0..n]);
+		self.pos += n;
+		return n;
+	}
+};
+
+test "decompressStream: read()-style sources are pulled in chunks, not per byte" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 200_000, 11);
+	defer allocator.free(data);
+	const stream = try compress(allocator, data);
+	defer allocator.free(stream);
+	try std.testing.expect(stream.len > 16 * 1024);
+
+	var src: CountingReader = .{ .data = stream };
+	var out: std.Io.Writer.Allocating = .init(allocator);
+	defer out.deinit();
+	try decompressStream(allocator, &src, &out.writer, .{});
+	try std.testing.expectEqualSlices(u8, data, out.written());
+	// One call per 1 KiB of input at most (plus the EOF probes), where a
+	// byte-at-a-time reader makes one call per byte.
+	try std.testing.expect(src.calls <= stream.len / 1024 + 4);
 }
 
 test "diagnostics: sniper sweep, every single-bit flip lies inside [window_start_bit, bit_offset)" {
