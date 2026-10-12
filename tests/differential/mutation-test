@@ -1,0 +1,105 @@
+#!/usr/bin/env luajit
+-- Controls for tests/differential/mutation.lua. Damage is measured from the
+-- byte difference between input and output, not from the mutator's record,
+-- and the record must agree with that difference.
+package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/?.lua;" .. package.path
+local bit = require("bit")
+local m = require("mutation")
+
+local failures = 0
+local function fail(msg)
+	io.stderr:write("FAIL: " .. msg .. "\n")
+	failures = failures + 1
+end
+
+local function popcount(x)
+	local n = 0
+	while x ~= 0 do n = n + bit.band(x, 1); x = bit.rshift(x, 1) end
+	return n
+end
+
+-- Changed stream bits (MSB-first) between two equal-length strings.
+local function changed_bits(a, b)
+	local bits = {}
+	for i = 1, #a do
+		local d = bit.bxor(a:byte(i), b:byte(i))
+		for k = 0, 7 do
+			if bit.band(d, bit.rshift(0x80, k)) ~= 0 then bits[#bits + 1] = (i - 1) * 8 + k end
+		end
+	end
+	return bits
+end
+
+local function input_of(len, seed)
+	local r, t = m.rng(seed), {}
+	for i = 1, len do t[i] = string.char(r.below(256)) end
+	return table.concat(t)
+end
+
+-- splitmix64 known answers for seed 0 (published reference outputs).
+do
+	local r = m.rng(0)
+	local expected = { "0xe220a8397b1dcdaf", "0x6e789e6aa1b965f4", "0x06c45d188009454f" }
+	for i, want in ipairs(expected) do
+		local got = string.format("0x%016x", r.next())
+		if got ~= want then fail(string.format("splitmix64 output %d: got %s want %s", i, got, want)) end
+	end
+end
+
+-- Shotgun over many seeds: exact Hamming distance, contained window, length
+-- kept, record equal to the measured difference, deterministic per seed.
+do
+	local data = input_of(100, 1)
+	local seen_offsets = {}
+	for seed = 1, 2000 do
+		local out, rec = m.shotgun(data, m.rng(seed))
+		if #out ~= #data then fail("shotgun changed length, seed " .. seed) break end
+		local diff = changed_bits(data, out)
+		if #diff ~= m.SHOTGUN_BITS then fail(string.format("shotgun seed %d: %d bits changed", seed, #diff)) break end
+		if diff[1] < rec.offset * 8 or diff[#diff] >= (rec.offset + m.SHOTGUN_WINDOW_BYTES) * 8 then
+			fail("shotgun seed " .. seed .. ": change outside the window") break
+		end
+		if rec.offset < 0 or rec.offset > #data - m.SHOTGUN_WINDOW_BYTES then fail("shotgun window not contained, seed " .. seed) break end
+		if table.concat(diff, ",") ~= table.concat(rec.bits, ",") then fail("shotgun seed " .. seed .. ": record disagrees with the difference") break end
+		if m.shotgun(data, m.rng(seed)) ~= out then fail("shotgun not deterministic, seed " .. seed) break end
+		seen_offsets[rec.offset] = true
+	end
+	if not (seen_offsets[0] and seen_offsets[#data - m.SHOTGUN_WINDOW_BYTES]) then fail("shotgun never reached both edge offsets") end
+	-- Exactly window-sized input has one legal offset; shorter is refused.
+	local _, rec = m.shotgun(input_of(32, 2), m.rng(9))
+	if rec.offset ~= 0 then fail("32-byte input: offset " .. rec.offset) end
+	if m.shotgun(input_of(31, 2), m.rng(9)) ~= nil then fail("31-byte input not refused by shotgun") end
+end
+
+-- Nuke: contained window, length kept, never the identity.
+do
+	local data = input_of(5000, 3)
+	for seed = 1, 200 do
+		local out, rec = m.nuke(data, m.rng(seed))
+		if #out ~= #data then fail("nuke changed length, seed " .. seed) break end
+		if out == data then fail("nuke left input unchanged, seed " .. seed) break end
+		if out:sub(1, rec.offset) ~= data:sub(1, rec.offset) or out:sub(rec.offset + m.NUKE_BYTES + 1) ~= data:sub(rec.offset + m.NUKE_BYTES + 1) then
+			fail("nuke changed bytes outside its window, seed " .. seed) break
+		end
+		if m.nuke(data, m.rng(seed)) ~= out then fail("nuke not deterministic, seed " .. seed) break end
+	end
+	if m.nuke(input_of(4095, 4), m.rng(1)) ~= nil then fail("4095-byte input not refused by nuke") end
+	local _, rec = m.nuke(input_of(4096, 4), m.rng(1))
+	if rec.offset ~= 0 then fail("4096-byte input: offset " .. rec.offset) end
+
+	-- Injected generators: one that first reproduces the original window
+	-- must cause exactly one redraw; one that never changes it must fail.
+	local zeros = string.rep("\0", m.NUKE_BYTES)
+	local calls = 0
+	local first_identity = { below = function(n) calls = calls + 1; if calls <= 1 + m.NUKE_BYTES then return 0 end return 7 % n end }
+	local out, r = m.nuke(zeros, first_identity)
+	if r.redraws ~= 1 or out == zeros then fail("identity replacement not redrawn exactly once") end
+	local stuck = { below = function() return 0 end }
+	if pcall(m.nuke, zeros, stuck) then fail("a generator that never changes the window did not fail") end
+end
+
+if failures ~= 0 then
+	io.stderr:write("mutation-test: " .. failures .. " failure(s)\n")
+	os.exit(1)
+end
+print("mutation-test: all controls passed")

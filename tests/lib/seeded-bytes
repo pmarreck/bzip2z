@@ -1,0 +1,17 @@
+#!/usr/bin/env luajit
+-- seeded-bytes SEED COUNT: write COUNT deterministic, incompressible bytes to
+-- stdout (splitmix64 from tests/differential/mutation.lua), so tests get
+-- large reproducible inputs without /dev/urandom.
+package.path = (arg[0]:match("^(.*)/[^/]*$") or ".") .. "/../differential/?.lua;" .. package.path
+local seed, count = tonumber(arg[1]), tonumber(arg[2])
+if not seed or not count or count < 0 then
+	io.stderr:write("usage: seeded-bytes SEED COUNT\n")
+	os.exit(2)
+end
+local r = require("mutation").rng(seed)
+local chunk = 65536
+for start = 1, count, chunk do
+	local t = {}
+	for i = 1, math.min(chunk, count - start + 1) do t[i] = string.char(r.below(256)) end
+	io.write(table.concat(t))
+end

@@ -227,8 +227,9 @@ diff -u "$work_dir/sample.orig" <(printf '%s' "$out") >/dev/null || fail "bzcat 
 # -j parallel multi-stream (round-trip, stdout)
 big_src="$work_dir/big.bin"
 big_orig="$work_dir/big.orig"
-head -c 2000000 </dev/urandom >"$big_src" || die "cannot write random input"
-cp "$big_src" "$big_orig" || die "cannot copy random input"
+# Seeded incompressible bytes, identical on every run.
+"$root_dir/tests/lib/seeded-bytes" 20261011 2000000 >"$big_src" || die "cannot write seeded input"
+cp "$big_src" "$big_orig" || die "cannot copy seeded input"
 
 capture "$cli" -j 2 -k "$big_src"
 [ "$rc" -eq 0 ] || fail "parallel compress exited $rc"

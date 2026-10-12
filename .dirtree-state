@@ -3,6 +3,8 @@ ver=1.2
 annotate=[
 	docs/mktp-research/bzip2.md = bzip2 decoder integrity evidence: invariant inventory, differential results, blind class, pins, rejected ideas
 	tests/differential/classify-test = Set test of the sweep classifier: all verdict pairs plus real-process exit statuses; run by ./test
+	tests/differential/mutation-test = Controls for mutation.lua: exact Hamming distance, contained windows, nonidentity, splitmix64 known answers
+	tests/differential/mutation.lua = Pure seeded shotgun/nuke mutators (geometry v3) and splitmix64 generator for the differential sweep
 	tests/differential/replay-runner = Deliberate evidence replay: clean-tree check, ./test, ReleaseSafe build, sweep; private state dir, status.json, nonzero on any failed stage
 	tests/differential/replay-runner-test = Injected-step controls proving replay-runner cannot go green on failed test/build/sweep, missing/zero-trial report, dirty tree
 	tests/differential/sniper-domain.json = Declared sniper-sweep domain (definition, classifier, trial count, corpus names/sizes/strides/sha256) enforced by replay-runner
@@ -10,4 +12,5 @@ annotate=[
 	tests/differential/sniper_classify.lua = Pure verdict/outcome classifier for the differential sweep (exit-status decoding, crash handling)
 	tests/lanes-test = Controls for the lane runner: injected failing, missing, killed and empty lanes must never yield a green run
 	tests/lib/lanes.bash = Lane runner for ./test: records each required check's exit status, runs every lane, fails on any failure or an empty run
+	tests/lib/seeded-bytes = seeded-bytes SEED COUNT: deterministic incompressible bytes for large test inputs
 ]

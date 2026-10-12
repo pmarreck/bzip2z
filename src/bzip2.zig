@@ -4975,7 +4975,7 @@ test "decompressStream: works with a plain read()-style reader (FileSource shape
 	try std.testing.expectEqualSlices(u8, data, out.written());
 }
 
-test "diagnostics: every single-bit flip lies inside [window_start_bit, bit_offset)" {
+test "diagnostics: sniper sweep, every single-bit flip lies inside [window_start_bit, bit_offset)" {
 	// Oracle independent of the decoder: we know exactly which bit we flipped.
 	// A sequential decoder cannot detect a flip before reading it, and any
 	// block whose CRC verified cannot contain it, so the reported window must
@@ -5024,6 +5024,135 @@ test "diagnostics: every single-bit flip lies inside [window_start_bit, bit_offs
 	try std.testing.expect(errors_seen * 100 >= flips * 95);
 }
 
+
+/// Damage of one shotgun or nuke case, as stream bit indexes (MSB-first, the
+/// order the decoder reads), so the Diagnostics window can be checked against
+/// exactly the bits that changed.
+const Damage = struct {
+	bits: std.ArrayListUnmanaged(u64) = .empty,
+
+	fn deinit(self: *Damage, allocator: Allocator) void {
+		self.bits.deinit(allocator);
+	}
+
+	/// True when some changed bit lies in [start, end).
+	fn anyIn(self: Damage, start: u64, end: u64) bool {
+		for (self.bits.items) |b| if (start <= b and b < end) return true;
+		return false;
+	}
+};
+
+const SHOTGUN_WINDOW_BYTES = 32;
+const SHOTGUN_BITS = 16;
+const NUKE_BYTES = 4096;
+
+/// Shotgun (mutation vocabulary geometry v3): flip exactly SHOTGUN_BITS
+/// distinct bits inside one fully contained SHOTGUN_WINDOW_BYTES window.
+/// Positions come from a partial Fisher-Yates over the window's bits, so the
+/// Hamming distance is exact without a rejection loop. Records the changed bits.
+fn shotgun(allocator: Allocator, rng: std.Random, data: []u8, damage: *Damage) !void {
+	const window_bits = SHOTGUN_WINDOW_BYTES * 8;
+	const offset = rng.uintAtMost(usize, data.len - SHOTGUN_WINDOW_BYTES);
+	var positions: [window_bits]u16 = undefined;
+	for (&positions, 0..) |*p, i| p.* = @intCast(i);
+	for (0..SHOTGUN_BITS) |i| {
+		const j = rng.intRangeAtMost(usize, i, window_bits - 1);
+		std.mem.swap(u16, &positions[i], &positions[j]);
+		const bit = @as(u64, offset) * 8 + positions[i];
+		flipBit(data, bit);
+		try damage.bits.append(allocator, bit);
+	}
+}
+
+/// Nuke: overwrite one fully contained NUKE_BYTES window with seeded random
+/// bytes, redrawing a window that equals the original. Records every changed bit.
+fn nuke(allocator: Allocator, rng: std.Random, data: []u8, damage: *Damage) !void {
+	const offset = rng.uintAtMost(usize, data.len - NUKE_BYTES);
+	const window = data[offset..][0..NUKE_BYTES];
+	var replacement: [NUKE_BYTES]u8 = undefined;
+	while (true) {
+		rng.bytes(&replacement);
+		if (!std.mem.eql(u8, &replacement, window)) break;
+	}
+	for (window, replacement, 0..) |old, new, i| {
+		const diff = old ^ new;
+		for (0..8) |k| {
+			if (diff & (@as(u8, 0x80) >> @intCast(k)) != 0)
+				try damage.bits.append(allocator, @as(u64, offset + i) * 8 + k);
+		}
+	}
+	@memcpy(window, &replacement);
+}
+
+/// Seeded multi-bit damage sweep over a four-stream corpus (small stream,
+/// two-block level-1 stream, random-bytes stream, small stream). Every case must decode without a
+/// panic, and a rejected case's Diagnostics window must contain at least one
+/// changed bit: the decoder cannot detect damage it has not read, and a
+/// CRC-verified block cannot hold the damage that caused the error.
+fn damageSweep(mutate: anytype, seed: u64, cases: usize) !void {
+	const allocator = std.testing.allocator;
+	const big = try allocator.alloc(u8, 101_000);
+	defer allocator.free(big);
+	for (big, 0..) |*b, i| b.* = @truncate((i * 7) % 251 + (i / 5000));
+	const multi_block = try compressWithOptions(allocator, big, .{ .level = 1 });
+	defer allocator.free(multi_block);
+	const small = try compress(allocator, "a second, much smaller stream");
+	defer allocator.free(small);
+	// Seeded random bytes barely compress, so this stream alone holds a full
+	// nuke window.
+	const noise = try allocator.alloc(u8, 6_000);
+	defer allocator.free(noise);
+	var noise_prng = std.Random.DefaultPrng.init(0x4E01_5E);
+	noise_prng.random().bytes(noise);
+	const noise_stream = try compress(allocator, noise);
+	defer allocator.free(noise_stream);
+	const good = try std.mem.concat(allocator, u8, &.{ small, multi_block, noise_stream, small });
+	defer allocator.free(good);
+
+	if (noise_stream.len < NUKE_BYTES) {
+		std.debug.print("noise stream is {d} bytes, shorter than the {d}-byte nuke window\n", .{ noise_stream.len, NUKE_BYTES });
+		return error.TestCorpusTooShort;
+	}
+	const input = try allocator.dupe(u8, good);
+	defer allocator.free(input);
+	var prng = std.Random.DefaultPrng.init(seed);
+	var rejected: usize = 0;
+	for (0..cases) |case| {
+		@memcpy(input, good);
+		var damage: Damage = .{};
+		defer damage.deinit(allocator);
+		try mutate(allocator, prng.random(), input, &damage);
+		try std.testing.expect(damage.bits.items.len > 0);
+
+		var reader: std.Io.Reader = .fixed(input);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }) catch |err| switch (err) {
+			error.OutOfMemory => return err,
+			else => {
+				rejected += 1;
+				if (!damage.anyIn(diag.window_start_bit, diag.bit_offset)) {
+					std.debug.print("seed {d} case {d}: no changed bit in window [{d}, {d}) phase {t}; first changed bit {d}\n", .{ seed, case, diag.window_start_bit, diag.bit_offset, diag.phase, std.mem.min(u64, damage.bits.items) });
+					return error.TestExpectedDamageInWindow;
+				}
+				continue;
+			},
+		};
+	}
+	// Sanity: multi-bit damage outside padding is nearly always detected.
+	if (rejected * 100 < cases * 95) {
+		std.debug.print("seed {d}: only {d} of {d} damaged cases rejected\n", .{ seed, rejected, cases });
+		return error.TestTooFewRejections;
+	}
+}
+
+test "corrupt input: shotgun sweep never panics and brackets damage in the Diagnostics window" {
+	try damageSweep(shotgun, 0x5407_6013, 400);
+}
+
+test "corrupt input: nuke sweep never panics and brackets damage in the Diagnostics window" {
+	try damageSweep(nuke, 0x0B0B_4096, 60);
+}
 // ============ validate work order 2026-09-30 ============
 
 test "decompressStream: RLE1 expansion memory is independent of run length (validate 2026-09-30 #1)" {
