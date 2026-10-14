@@ -1,0 +1,45 @@
+{
+  "definition": "nuke/v3-geometry: contained 4096-byte overwrite, splitmix64 bytes, identity redrawn; corpus seed 20261009",
+  "classifier": "classifier/v2",
+  "mode": "nuke",
+  "seed": 1,
+  "cases_per_stream": 1000,
+  "trials": 2000,
+  "not_run": [
+    "text-1500-l9",
+    "two-streams",
+    "pattern-101000-l1-two-blocks"
+  ],
+  "corpus": [
+    {
+      "name": "text-1500-l9",
+      "bytes": 274,
+      "stride": 1,
+      "sha256": "903b01abcc3f93e979e99d1071ce66dd4f869b268fc547ee116e7fe1bb3e829f"
+    },
+    {
+      "name": "two-streams",
+      "bytes": 410,
+      "stride": 1,
+      "sha256": "d55f478011b5567f2433406991297142ada5925400e3b4fb8d40971fd471d68b"
+    },
+    {
+      "name": "pattern-101000-l1-two-blocks",
+      "bytes": 1740,
+      "stride": 7,
+      "sha256": "74599d4fa8fe2db970999879520c2891646f3a739d80daef531ba71a332565de"
+    },
+    {
+      "name": "noise-8000-l9",
+      "bytes": 8501,
+      "stride": 1,
+      "sha256": "560691bd2bc9798c3d9148271138fb85c36e66e3c1a928a80a7ad69bce275554"
+    },
+    {
+      "name": "noise-150000-l1-two-blocks",
+      "bytes": 151372,
+      "stride": 1,
+      "sha256": "cfe6be4b8b46926ab28f6f557d3c63b15c72c4fc0013a1fbefb473b26dc86c38"
+    }
+  ]
+}

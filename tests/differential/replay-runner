@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Deliberate replay of the differential evidence for the current commit:
 # requires a clean tree, then runs ./test, builds the ReleaseSafe CLI and
-# runs the sniper sweep, keeping every log, the report and identity hashes in
+# runs the sweep, keeping every log, the report and identity hashes in
 # a fresh private state directory outside $TMPDIR (which a build scheduler
-# may delete when a job ends). The report must match the declared domain in
-# tests/differential/sniper-domain.json exactly. Exits nonzero if any stage
-# fails, a check fails, the source revision moves, or the receipt
-# (status.json, written with jq) cannot be written.
+# may delete when a job ends). Usage: replay-runner [sniper|shotgun|nuke]
+# (default sniper). The report must match the declared domain in
+# tests/differential/MODE-domain.json exactly; a damage-mode manifest also
+# fixes the seed, cases per stream and the streams too short to run. Exits
+# nonzero if any stage fails, a check fails, the source revision moves, or the
+# receipt (status.json, written with jq) cannot be written.
 #
 # Injection points (used by tests/differential/replay-runner-test):
 #   REPLAY_STATE_DIR, REPLAY_DOMAIN, REPLAY_TEST_CMD, REPLAY_BUILD_CMD,
@@ -14,7 +16,7 @@
 set -u
 
 here="$(cd "$(dirname "$0")" && pwd)"
-domain="${REPLAY_DOMAIN:-$here/sniper-domain.json}"
+domain="${REPLAY_DOMAIN:-$here/${1:-sniper}-domain.json}"
 test_cmd="${REPLAY_TEST_CMD:-./test}"
 build_cmd="${REPLAY_BUILD_CMD:-zig build -Doptimize=ReleaseSafe}"
 sweep_cmd="${REPLAY_SWEEP_CMD:-tests/differential/sniper-vs-reference}"
@@ -25,6 +27,13 @@ fail() { echo "replay-runner: $*" >&2; exit 2; }
 
 command -v jq >/dev/null || fail "jq is required"
 jq -e . "$domain" >/dev/null 2>&1 || fail "domain manifest $domain is missing or not JSON"
+# Damage modes (shotgun, nuke) replay the seed and case count the manifest
+# declares; a sniper manifest has no mode and needs no arguments.
+mode="$(jq -r '.mode // "sniper"' "$domain")"
+mode_args=()
+if [ "$mode" != sniper ]; then
+	mode_args=(--mode "$mode" --seed "$(jq -r .seed "$domain")" --cases "$(jq -r .cases_per_stream "$domain")")
+fi
 if [ -n "${REPLAY_STATE_DIR:-}" ]; then
 	state="$REPLAY_STATE_DIR"
 else
@@ -84,7 +93,7 @@ elif [ ! -f "$bin" ]; then
 	stage binary 1; stage sweep skipped; stage report skipped
 else
 	stage binary 0
-	bash -c "$sweep_cmd \"\$1\" \"\$2\"" sweep "$bin" "$reference" > "$report" 2> "$state/sweep.err"; stage sweep $?
+	bash -c "$sweep_cmd \"\$@\"" sweep ${mode_args[@]+"${mode_args[@]}"} "$bin" "$reference" > "$report" 2> "$state/sweep.err"; stage sweep $?
 	# The report must be exactly one JSON object matching the declared domain,
 	# with every pristine control accepted by both sides, every outcome counter
 	# a nonnegative integer, no failing outcome, and the passing outcomes
@@ -97,7 +106,13 @@ else
 		and .both_accept + .both_reject + .intentional_divergence == .trials
 		and .definition == $m[0].definition and .classifier == $m[0].classifier
 		and .trials == $m[0].trials and .trials > 0
-		and .trials == ([.corpus[] | ((.bytes * 8 + .stride - 1) / .stride | floor)] | add)
+		and (if ($m[0].mode // "sniper") == "sniper"
+			then .trials == ([.corpus[] | ((.bytes * 8 + .stride - 1) / .stride | floor)] | add)
+			else .seed == $m[0].seed and .cases_per_stream == $m[0].cases_per_stream
+				and ([.not_run[].name] | sort) == ($m[0].not_run | sort)
+				and ([.not_run[].name] - [.corpus[].name]) == []
+				and .trials == .cases_per_stream * ((.corpus | length) - (.not_run | length))
+			end)
 		and ([.corpus[] | {name, bytes, stride, sha256}] == [$m[0].corpus[] | {name, bytes, stride, sha256}])
 		and all(.corpus[]; .control == "accept/accept")
 		and .experiment_error == 0 and .bzip2z_only_reject == 0 and .reference_only_reject == 0

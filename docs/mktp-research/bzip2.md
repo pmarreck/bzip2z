@@ -240,7 +240,13 @@ stderr. It succeeds only when:
   `tests/differential/sniper-domain.json` exactly: definition, classifier,
   trial count, and each corpus item's name, size, stride and sha256. The
   trial count must also equal the sum of ceil(bytes x 8 / stride) over the
-  corpus, so the count is derived from the extents, not trusted;
+  corpus, so the count is derived from the extents, not trusted. Run as
+  `replay-runner shotgun` or `replay-runner nuke`, it uses
+  `shotgun-domain.json` or `nuke-domain.json` instead, passes the declared
+  seed and case count to the sweep, and requires the report to repeat them
+  and the declared list of streams too short to run. Those streams must be
+  in the corpus, and the trial count must equal cases per stream times the
+  streams that ran;
 - the reference binary exists and is executable;
 - every pristine control is accepted by both decoders, and no crash,
   experiment error or unexplained disagreement is reported;
@@ -347,8 +353,9 @@ nix develop -c bash -c 'tests/differential/sniper-vs-reference --mode nuke --see
 ```
 
 These are counts over one seeded sample per mode, not an exhaustive domain.
-The replay runner checks only the sniper domain; damage-mode reports are not
-yet validated by it. In-process, `src/bzip2.zig` runs smaller seeded shotgun
+The replay runner checks a replay of either sweep against
+`tests/differential/shotgun-domain.json` or `nuke-domain.json`, made from
+the reports above. In-process, `src/bzip2.zig` runs smaller seeded shotgun
 and nuke sweeps on every `./test`. Those sweeps assert no panic and that the
 Diagnostics window brackets the damage.
 

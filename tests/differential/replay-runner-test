@@ -110,6 +110,66 @@ if ! jq -e '.stages.test == 0 and .complete == false' "$root/state-terminated-in
 fi
 run quoted-reference yes REPLAY_REFERENCE="$quoted_reference"
 
+
+# Damage modes (shotgun, nuke): the manifest declares mode, seed, cases per
+# stream and the streams too short to run. The runner must pass them to the
+# sweep and check that the report echoes them, with trials equal to cases
+# times the streams that ran. The fake builds its report from its arguments,
+# so a runner that drops them fails the seed and case checks.
+damage_manifest="$root/damage-domain.json"
+cat > "$damage_manifest" <<'JSON'
+{"definition":"dmg1","classifier":"classifier/v2","mode":"shotgun","seed":7,"cases_per_stream":5,"trials":5,
+ "not_run":["short"],
+ "corpus":[{"name":"long","bytes":40,"stride":1,"sha256":"aa"},{"name":"short","bytes":3,"stride":1,"sha256":"bb"}]}
+JSON
+damage_sweep="$root/damage-sweep"
+printf '#!%s\n' "$BASH" > "$damage_sweep"
+cat >> "$damage_sweep" <<'SWEEP'
+mode="" seed="" cases=""
+while [ $# -gt 2 ]; do
+	case "$1" in --mode) mode="$2"; shift 2 ;; --seed) seed="$2"; shift 2 ;; --cases) cases="$2"; shift 2 ;; *) shift ;; esac
+done
+[ "$mode" = shotgun ] || { echo "fake damage sweep: mode '$mode'" >&2; exit 1; }
+good="$(jq -nc --argjson seed "${seed:-null}" --argjson cases "${cases:-null}" '{definition:"dmg1",classifier:"classifier/v2",reference:"r",
+	corpus:[{name:"long",bytes:40,stride:1,sha256:"aa",control:"accept/accept"},{name:"short",bytes:3,stride:1,sha256:"bb",control:"accept/accept"}],
+	seed:$seed,cases_per_stream:$cases,not_run:[{name:"short",reason:"input shorter than the shotgun window"}],
+	trials:$cases,both_accept:0,both_reject:$cases,intentional_divergence:0,experiment_error:0,
+	bzip2z_only_reject:0,reference_only_reject:0,bzip2z_crash:0,reference_crash:0}')"
+case "${FAKE_SWEEP:-good}" in
+	good) echo "$good" ;;
+	other-seed) echo "$good" | jq -c '.seed = 8' ;;
+	no-seed) echo "$good" | jq -c 'del(.seed)' ;;
+	other-cases) echo "$good" | jq -c '.cases_per_stream = 4' ;;
+	all-run) echo "$good" | jq -c '.not_run = []' ;;
+	swapped-not-run) echo "$good" | jq -c '.not_run = [{name:"long",reason:"input shorter than the shotgun window"}]' ;;
+	ghost-not-run) echo "$good" | jq -c '.not_run = [{name:"ghost",reason:"input shorter than the shotgun window"}]' ;;
+	underived) echo "$good" | jq -c '.trials = 10 | .both_reject = 10' ;;
+esac
+SWEEP
+chmod +x "$damage_sweep"
+run damage-good yes REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep"
+run damage-other-seed no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=other-seed
+run damage-missing-seed no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=no-seed
+run damage-other-cases no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=other-cases
+run damage-not-run-differs no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=all-run
+run damage-trials-not-derived no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=underived
+run damage-swapped-not-run no REPLAY_DOMAIN="$damage_manifest" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=swapped-not-run
+# A manifest whose declared total disagrees with cases x streams run is
+# itself wrong, even when the report repeats that total.
+jq -c '.trials = 10' "$damage_manifest" > "$root/damage-domain-inconsistent.json"
+run damage-inconsistent-manifest no REPLAY_DOMAIN="$root/damage-domain-inconsistent.json" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=underived
+# A skipped stream must be one of the corpus streams.
+jq -c '.not_run = ["ghost"]' "$damage_manifest" > "$root/damage-domain-ghost.json"
+run damage-ghost-not-run no REPLAY_DOMAIN="$root/damage-domain-ghost.json" REPLAY_SWEEP_CMD="$damage_sweep" FAKE_SWEEP=ghost-not-run
+# Each damage control must fail at the report check, after a successful
+# sweep, so the cases test the report rules rather than an argument error.
+for name in damage-other-seed damage-missing-seed damage-other-cases damage-not-run-differs damage-trials-not-derived damage-swapped-not-run damage-inconsistent-manifest damage-ghost-not-run; do
+	if ! jq -e '.stages.sweep == 0 and .stages.report != 0' "$root/state-$name/status.json" >/dev/null 2>&1; then
+		echo "FAIL $name: not rejected by the report check"; jq -c .stages "$root/state-$name/status.json" 2>/dev/null; failures=$((failures + 1))
+	fi
+done
+# A sniper report must not satisfy a damage manifest.
+run damage-given-sniper-report no REPLAY_DOMAIN="$damage_manifest"
 # Good runs must leave a parseable status.json with stages and identities.
 for name in all-good quoted-reference; do
 	status="$root/state-$name/status.json"
