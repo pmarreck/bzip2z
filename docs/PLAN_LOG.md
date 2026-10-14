@@ -1,0 +1,24 @@
+# PLAN log
+
+Completed PLAN.md items retired by plan-retire, oldest retirement first.
+
+## Retired 2026-10-14
+
+- [x] [PLAN] Fix CI portability in `tests/cli_test` by using dotfiles `capture` when available and an in-memory fallback otherwise (no tempfile capture path). (completed 2026-02-22 14:41 EST)
+- [x] [PLAN] Repair CI observability and Garnix host compatibility by fixing README Garnix badge endpoint and scoping flake checks/packages to Linux-hosted multi-target builds. (completed 2026-02-22 14:41 EST)
+- [x] [PLAN] Add pure-memory Zig core surface (`src/core.zig`) and C FFI adapter (`src/ffi.zig`, `c/include/bzip2z.h`). (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Replace Zig CLI adapter with C CLI adapter that only calls the FFI (`c/cli.c`) while keeping CLI behavior used by tests. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Update `build.zig` to build/install C CLI binaries (`bzip2`, `bunzip2`, `bzcat`) and FFI static library. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Add Garnix CI definitions in `flake.nix` (flake-only, no Garnix YAML) for macOS aarch64, Linux x86_64/aarch64, Windows x86_64/aarch64 targets. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Add GitHub Actions CI matrix for the same 5 targets and publish downloadable artifacts. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Add README badges for Garnix and GitHub CI; update `CODE_MINIMAP.md` for new architecture files. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Re-run `./test`, run feasible flake/workflow sanity checks, then commit and push on `yolo`. (completed 2026-02-22 13:25 EST)
+- [x] [PLAN] Reject over-long RUNA/RUNB chains as CorruptData (validate inbox 2026-09-29); wired bzip2.zig/core.zig inline tests into test root; ReleaseSafe corrupt-input pass in ./test. Replied to validate with 9d7a049 + package hash. (completed 2026-09-29 21:05 EDT)
+- [x] [PLAN] Streaming decode API `decompressStream(allocator, reader, writer, options)`: any reader -> any writer (incl. discard), all block + stream CRCs across concatenated streams, allocations bounded by block not stream size (inbox/2026-07-10 from validate-archive-streaming; reply there). (completed 2026-09-29 21:40 EDT)
+- [x] [PLAN] Optional `Diagnostics` out-param for `decompressStream`: stream/block index, stream + block start bit, bit offset at detection (byte + bit), decode phase, stored vs computed CRC. Tell validate when landed. (completed 2026-09-29 21:40 EDT)
+- [x] [PLAN] Map reader/writer failures to ReadFailed/WriteFailed instead of CorruptData; write via writeAll (current `_ = writer.write` can drop bytes on short writes). (completed 2026-09-29 21:40 EDT)
+- [x] [PLAN] A block that decodes to zero symbols skips the BWT-index and CRC checks (`decodeBlockInternal` returns early); reference bzip2 rejects origPtr >= nblock there. Add a failing test, then reject. (completed 2026-10-09 23:48 EDT: rejected as InvalidBwtIndex)
+- [x] [PLAN] validate work order 2026-09-30: stream RLE1 expansion through fixed scratch (peak 70.7 MB -> 5.7 MB for 32 MiB zeros), reject 1-3 trailing header bytes as UnexpectedEof, cap blocks at level digit * 100000 symbols (OutputOverflow). (completed 2026-09-30 02:42 EDT)
+- [x] [PLAN] bzip2 evidence milestone: crafted structural differential vs reference bzip2 (black box) found and fixed 3 gaps (selectors > 18002 false positive, zero-symbol block, empty symbol map); reference-interop tests un-skipped (Zig 0.16 Io/readAlloc); bounded sniper sweep `tests/differential/sniper-vs-reference` (7461 trials, 0 unexplained disagreements, 0 crashes); record in docs/mktp-research/bzip2.md. (completed 2026-10-10 00:20 EDT)
+- [x] [PLAN] Crafted differential cases for randomized blocks and Kraft-violating code-length sets. Huffman cases agree with the format description and the reference; randomized cases found and fixed a one-byte toggle offset in `derandomize` (first toggle at 617, not 618). (completed 2026-10-10 14:00 EDT)
+- [x] [PLAN] `referenceDecode` (test helper) leaked the reference's stdout on oracle exit 1/3; injected-result test showed 2 leaks, fixed with errdefer. (completed 2026-10-10 18:47 EDT)
