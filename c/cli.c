@@ -525,6 +525,16 @@ static int write_file(const char* path, const uint8_t* data, size_t len) {
 	return ok;
 }
 
+/* Remove the source file after a successful (de)compress. Like bzip2, warn
+ * on stderr but do not fail when it cannot be unlinked (read-only mount,
+ * immutable flag, ACL, etc.). */
+static void remove_source_or_warn(const char* path) {
+	if (remove(path) != 0) {
+		fprintf(stderr, "bzip2z: warning: could not remove %s: %s\n",
+			path, strerror(errno));
+	}
+}
+
 static int run_compress_bytes(
 	const uint8_t* input,
 	size_t input_len,
@@ -609,7 +619,7 @@ static int compress_file(const char* path, const cli_options_t* opts) {
 	}
 
 	if (!opts->keep) {
-		remove(path);
+		remove_source_or_warn(path);
 	}
 
 	free(out_path);
@@ -675,7 +685,7 @@ static int decompress_file(const char* path, const cli_options_t* opts, bzip2z_d
 	}
 
 	if (!opts->keep) {
-		remove(path);
+		remove_source_or_warn(path);
 	}
 
 	free(out_path);

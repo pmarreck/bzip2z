@@ -275,6 +275,29 @@ check_diag "parallel -t"
 capture bash -c '"$1" -t <"$2"' _ "$cli" "$damaged"
 check_diag "stdin -t"
 
+# Warn, not silently ignore, when the source cannot be removed. Reference
+# bzip2 prints "Couldn't remove" in this case, keeps the output and exits 0.
+# The source must be unremovable while its directory stays writable (the
+# output goes there), which without root takes an immutable file flag:
+# macOS chflags. Elsewhere (Linux needs root for chattr +i) it is skipped.
+if [ "$(uname -s)" = "Darwin" ]; then
+	noremove_src="$work_dir/noremove.txt"
+	printf 'cannot remove me after compressing' >"$noremove_src" || die "cannot write $noremove_src"
+	if ! chflags uchg "$noremove_src"; then
+		fail "unremovable source: chflags uchg failed on macOS"
+	else
+		capture "$cli" "$noremove_src"
+		chflags nouchg "$noremove_src" || die "cannot clear immutable flag on $noremove_src"
+		[ "$rc" -eq 0 ] || fail "unremovable source: compress exited $rc"
+		[ -f "$noremove_src.bz2" ] || fail "unremovable source: compressed output missing"
+		[ -f "$noremove_src" ] || fail "unremovable source: source vanished despite immutable flag"
+		case "$err" in
+			*"could not remove"*"$noremove_src"*) : ;;
+			*) fail "unremovable source: expected a stderr warning, got: [$err]" ;;
+		esac
+	fi
+fi
+
 if [ "$failures" -ne 0 ]; then
 	echo "cli_test: $failures failure(s)" >&2
 	exit 1
