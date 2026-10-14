@@ -22,6 +22,5 @@
 - c/cli.c: C CLI adapter that performs all I/O and dogfoods the FFI.
 - bench/bench_bzip2.zig: Benchmark vs system bzip2.
 - fuzz/fuzz_stream_bzip2.zig: Fuzzing harness for round-trip safety.
-- cli/main.zig: Previous Zig CLI implementation retained for reference/migration continuity.
 - tests/cli_test: Bash CLI tests using `capture.bash` when present, with a verbatim in-memory `capture()` fallback for CI environments without dotfiles.
 - README.md: Overview, architecture, usage, benchmarks, and CI badges.
