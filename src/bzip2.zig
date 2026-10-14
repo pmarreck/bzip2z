@@ -112,6 +112,9 @@ pub const Error = error{
 	ReadFailed,
 	/// The output writer failed.
 	WriteFailed,
+	/// Bytes follow a complete stream and do not begin a valid stream header.
+	/// Diagnostics.trailing gives their offset, length and shape.
+	TrailingData,
 };
 
 pub const CompressOptions = struct {
@@ -578,8 +581,9 @@ pub const Decompressor = struct {
 				const byte_val = bits.readBits(8) catch |err| {
 					if (err == Error.UnexpectedEof) {
 						// A clean end is EOF exactly between streams; a partial
-						// next header is trailing garbage the caller must see.
-						if (!seen_stream or i > 0) return Error.UnexpectedEof;
+						// next header is trailing data the caller must see.
+						if (!seen_stream) return Error.UnexpectedEof;
+						if (i > 0) return self.trailingData(ReaderType, bits, header[0..i]);
 						return;
 					}
 					return err;
@@ -587,6 +591,9 @@ pub const Decompressor = struct {
 				header[i] = @intCast(byte_val);
 			}
 
+			const level = header[3];
+			const header_valid = std.mem.eql(u8, header[0..3], &STREAM_MAGIC) and level >= '1' and level <= '9';
+			if (!header_valid and seen_stream) return self.trailingData(ReaderType, bits, &header);
 			seen_stream = true;
 
 			// Validate magic
@@ -595,7 +602,6 @@ pub const Decompressor = struct {
 			}
 
 			// Validate block size digit ('1' - '9')
-			const level = header[3];
 			if (level < '1' or level > '9') {
 				return Error.InvalidBlockSize;
 			}
@@ -651,6 +657,31 @@ pub const Decompressor = struct {
 			bits.alignToByte();
 			self.diag.window_start_bit = bits.bitPosition();
 		}
+	}
+
+	/// Measure the bytes after the last complete stream (HEAD is what was read
+	/// of the would-be header) by draining the reader to its end, record their
+	/// extent and shape in diagnostics, and return TrailingData. Memory stays
+	/// constant however long the trailing data is.
+	fn trailingData(self: *Decompressor, comptime ReaderType: type, bits: *BitReader(ReaderType), head: []const u8) Error {
+		var length: u64 = head.len;
+		var all_zero = std.mem.allEqual(u8, head, 0);
+		while (true) {
+			const byte_val = bits.readBits(8) catch |err| {
+				if (err == Error.UnexpectedEof) break;
+				return err;
+			};
+			length += 1;
+			if (byte_val != 0) all_zero = false;
+		}
+		const prefix = @min(head.len, STREAM_MAGIC.len);
+		self.diag.trailing = .{
+			.offset = self.diag.stream_start_bit / 8,
+			.length = length,
+			.all_zero = all_zero,
+			.starts_with_partial_header = std.mem.eql(u8, head[0..prefix], STREAM_MAGIC[0..prefix]),
+		};
+		return Error.TrailingData;
 	}
 
 	fn readBlock(self: *Decompressor, comptime ReaderType: type, bits: *BitReader(ReaderType)) Error!void {
@@ -2450,6 +2481,22 @@ pub const Diagnostics = struct {
 	/// Streams and blocks fully decoded and verified (also set on success).
 	streams: u32 = 0,
 	blocks: u32 = 0,
+	/// Set for TrailingData: the bytes after the last complete stream.
+	trailing: ?Trailing = null,
+
+	pub const Trailing = struct {
+		/// Byte offset where the trailing data starts (the end of the last
+		/// complete stream, after its padding bits).
+		offset: u64,
+		/// Trailing bytes up to the end of the input.
+		length: u64,
+		/// Every trailing byte is zero (padding a producer may have written).
+		all_zero: bool,
+		/// The bytes begin as a stream header would ("B", "BZ", "BZh" or
+		/// "BZh" with a bad level digit): a truncated or damaged next
+		/// stream, not foreign data.
+		starts_with_partial_header: bool,
+	};
 
 	pub fn byteOffset(self: Diagnostics) u64 {
 		return self.bit_offset / 8;
@@ -4339,7 +4386,7 @@ test "diagnostics: over-long RUNB chain is located in symbol_data of block 0" {
 	try std.testing.expect(diag.bit_offset <= @as(u64, stream.len) * 8);
 }
 
-test "diagnostics: bad magic on second stream points at that stream" {
+test "diagnostics: bad magic after a complete stream is trailing data at that stream" {
 	const allocator = std.testing.allocator;
 	const s = try compress(allocator, "abc");
 	defer allocator.free(s);
@@ -4349,11 +4396,16 @@ test "diagnostics: bad magic on second stream points at that stream" {
 	var reader: std.Io.Reader = .fixed(input);
 	var discard: std.Io.Writer.Discarding = .init(&.{});
 	var diag: Diagnostics = .{};
-	try std.testing.expectError(Error.InvalidMagic, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+	try std.testing.expectError(Error.TrailingData, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
 	try std.testing.expectEqual(Diagnostics.Phase.stream_header, diag.phase);
 	try std.testing.expectEqual(@as(u32, 1), diag.stream_index);
 	try std.testing.expectEqual(@as(u64, s.len) * 8, diag.stream_start_bit);
-	try std.testing.expectEqual(@as(u64, s.len + 4) * 8, diag.bit_offset);
+	// Detection is at the end of the input, after the trailing bytes are measured.
+	try std.testing.expectEqual(@as(u64, input.len) * 8, diag.bit_offset);
+	const t = diag.trailing orelse return error.TestExpectedTrailing;
+	try std.testing.expectEqual(@as(u64, s.len), t.offset);
+	try std.testing.expectEqual(@as(u64, 11), t.length);
+	try std.testing.expect(!t.starts_with_partial_header);
 }
 
 test "diagnostics: truncation reports UnexpectedEof at end of input" {
@@ -4639,37 +4691,82 @@ test "decompressStream: RLE1 expansion memory is independent of run length (vali
 	try std.testing.expectEqual(peaks[0], peaks[1]);
 }
 
-test "decompressStream: 1-3 trailing header bytes after a stream are UnexpectedEof (validate 2026-09-30 #2)" {
+test "decompressStream: bytes after a complete stream are TrailingData with their extent (validate 2026-10-14)" {
 	const allocator = std.testing.allocator;
 	const stream = try compress(allocator, "complete stream");
 	defer allocator.free(stream);
 
-	// Classifier over the set of trailing fragments: only nothing is clean.
-	const tails = [_][]const u8{ "", "B", "BZ", "BZh", "BZh9" };
-	const expect_ok = [_]bool{ true, false, false, false, false };
-	for (tails, expect_ok) |tail, ok| {
-		const input = try std.mem.concat(allocator, u8, &.{ stream, tail });
+	const zeros = [_]u8{0} ** 512;
+	// Classifier over the set of tails after one complete stream. A tail that
+	// is a valid stream header is a second stream (truncated here), not
+	// trailing data; every other nonempty tail is TrailingData.
+	const Case = struct { tail: []const u8, err: ?Error, all_zero: bool = false, partial: bool = false };
+	const cases = [_]Case{
+		.{ .tail = "", .err = null },
+		.{ .tail = "B", .err = Error.TrailingData, .partial = true },
+		.{ .tail = "BZ", .err = Error.TrailingData, .partial = true },
+		.{ .tail = "BZh", .err = Error.TrailingData, .partial = true },
+		.{ .tail = "BZhX", .err = Error.TrailingData, .partial = true },
+		.{ .tail = "BZh0 and more", .err = Error.TrailingData, .partial = true },
+		.{ .tail = "BZ\x00", .err = Error.TrailingData },
+		.{ .tail = "junk!junk!", .err = Error.TrailingData },
+		.{ .tail = "\x00", .err = Error.TrailingData, .all_zero = true },
+		.{ .tail = &zeros, .err = Error.TrailingData, .all_zero = true },
+		.{ .tail = "\x00\x00\x01", .err = Error.TrailingData },
+		.{ .tail = "BZh9", .err = Error.UnexpectedEof },
+	};
+	for (cases) |c| {
+		const input = try std.mem.concat(allocator, u8, &.{ stream, c.tail });
 		defer allocator.free(input);
 		var reader: std.Io.Reader = .fixed(input);
 		var discard: std.Io.Writer.Discarding = .init(&.{});
 		var diag: Diagnostics = .{};
 		const result = decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag });
-		if (ok) {
-			try result;
-		} else {
-			try std.testing.expectError(Error.UnexpectedEof, result);
-			try std.testing.expectEqual(@as(u32, 1), diag.stream_index);
+		if (c.err) |expected| {
+			try std.testing.expectError(expected, result);
+			try std.testing.expectEqual(@as(u32, 1), diag.streams);
 			try std.testing.expectEqual(@as(u64, stream.len) * 8, diag.stream_start_bit);
+			if (expected == Error.TrailingData) {
+				const t = diag.trailing orelse return error.TestExpectedTrailing;
+				try std.testing.expectEqual(@as(u64, stream.len), t.offset);
+				try std.testing.expectEqual(@as(u64, c.tail.len), t.length);
+				try std.testing.expectEqual(c.all_zero, t.all_zero);
+				try std.testing.expectEqual(c.partial, t.starts_with_partial_header);
+			} else {
+				try std.testing.expect(diag.trailing == null);
+			}
+		} else {
+			try result;
+			try std.testing.expect(diag.trailing == null);
 		}
 		// The slice API must agree.
 		if (decompress(allocator, input)) |out| {
 			allocator.free(out);
-			try std.testing.expect(ok);
+			try std.testing.expect(c.err == null);
 		} else |err| {
-			try std.testing.expect(!ok);
-			try std.testing.expectEqual(Error.UnexpectedEof, err);
+			try std.testing.expectEqual(c.err.?, err);
 		}
 	}
+
+	// Without a complete stream first, bad bytes are not trailing data.
+	for ([_][]const u8{ "junk!junk!", "BZ" }, [_]Error{ Error.InvalidMagic, Error.UnexpectedEof }) |input, expected| {
+		var reader: std.Io.Reader = .fixed(input);
+		var discard: std.Io.Writer.Discarding = .init(&.{});
+		var diag: Diagnostics = .{};
+		try std.testing.expectError(expected, decompressStream(allocator, &reader, &discard.writer, .{ .diagnostics = &diag }));
+		try std.testing.expect(diag.trailing == null);
+	}
+}
+
+test "decompress: trailing data after concatenated streams is TrailingData on the parallel path too" {
+	const allocator = std.testing.allocator;
+	const data = try testPayload(allocator, 250_000, 3);
+	defer allocator.free(data);
+	const streams = try compressWithOptions(allocator, data, .{ .level = 1, .multi_stream = true, .threads = 2 });
+	defer allocator.free(streams);
+	const input = try std.mem.concat(allocator, u8, &.{ streams, "\x00" ** 64 });
+	defer allocator.free(input);
+	try std.testing.expectError(Error.TrailingData, decompressWithOptions(allocator, input, .{ .threads = 2, .parallel = true }));
 }
 
 test "decompressStream: level digit caps block size at level*100000 (validate 2026-09-30 #3)" {

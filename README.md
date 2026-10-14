@@ -375,9 +375,20 @@ the block being decoded. `[window_start_bit, bit_offset)` is the guaranteed
 bracket: it starts at the last CRC-verified block, because a CRC covers decoded
 bytes, not bit layout. `stored_crc`/`computed_crc` are set on CRC mismatches.
 
+Bytes after a complete stream that do not begin a valid stream header fail as
+`error.TrailingData`, and `diag.trailing` gives their byte `offset` and
+`length`, whether they are `all_zero`, and whether they
+`starts_with_partial_header` ("B", "BZ", "BZh", or "BZh" with a bad level
+digit). That separates zero padding, a cut-off next stream and foreign data
+from damage inside a stream. Reference bzip2 warns about such data and exits
+0; bzip2z reports it and assigns no verdict, leaving that to the caller. A
+complete header followed by nothing is a truncated stream (`UnexpectedEof`),
+and bad bytes before any complete stream are not trailing data.
+
 From C, pass a `bzip2z_diagnostics_t` in the decompress options. It is filled
-only when a CRC-checked decode fails as `BZIP2Z_INVALID_DATA` or
-`BZIP2Z_CRC_MISMATCH` (`valid` is 1); the report comes from a sequential re-decode
+only when a CRC-checked decode fails as `BZIP2Z_INVALID_DATA`,
+`BZIP2Z_CRC_MISMATCH` or `BZIP2Z_TRAILING_DATA` (`valid` is 1; for trailing
+data, `has_trailing` is 1 and the `trailing_*` fields are set); the report comes from a sequential re-decode
 that runs only after a failure, so a successful parallel decode keeps its speed.
 `bzip2z_phase_name` returns a phase's name as a pointer plus a byte length.
 
@@ -420,6 +431,17 @@ The damage lies within the reported byte range. Detection can come well after
 the damage (here, at the end of the block whose CRC failed), and the range starts
 at the beginning of the last block whose CRC verified (a CRC covers decoded
 bytes, not bit layout, so that block can still hold the damage).
+
+Bytes after the last complete stream get their own status. A 40 KB stream
+followed by 512 zero bytes gives:
+
+```
+padded.bz2: TRAILING_DATA: 512 bytes at byte 40249 after 1 complete stream (all zero)
+```
+
+The shape in parentheses is `all zero`, `starts like a stream header` (a
+cut-off or damaged next stream) or `not zero, not a stream header`. The exit
+status is 1, as for any other failed check.
 
 ### Progress display
 

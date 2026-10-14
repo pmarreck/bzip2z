@@ -15,6 +15,9 @@ typedef enum bzip2z_status {
 	BZIP2Z_CRC_MISMATCH = 3,
 	BZIP2Z_OUT_OF_MEMORY = 4,
 	BZIP2Z_INTERNAL_ERROR = 5,
+	/* Bytes follow a complete stream and do not begin a valid stream header;
+	   see bzip2z_diagnostics_t.trailing_*. */
+	BZIP2Z_TRAILING_DATA = 6,
 } bzip2z_status_t;
 
 typedef struct bzip2z_buffer {
@@ -48,7 +51,8 @@ typedef enum bzip2z_phase {
 
 /*
  * Failure report for bzip2z_decompress. When options->diagnostics is non-NULL
- * and check_crc is set, a BZIP2Z_INVALID_DATA or BZIP2Z_CRC_MISMATCH result
+ * and check_crc is set, a BZIP2Z_INVALID_DATA, BZIP2Z_CRC_MISMATCH or
+ * BZIP2Z_TRAILING_DATA result
  * sets valid to 1 and fills the other fields; in every other case valid is 0
  * and the other fields are unspecified. The report comes from a sequential,
  * CRC-checked re-decode that runs only after a failure, so a successful
@@ -77,6 +81,15 @@ typedef struct bzip2z_diagnostics {
 	uint8_t has_block_start;
 	uint8_t has_crc;
 	uint8_t reserved;
+	/* Meaningful only when has_trailing is 1 (status BZIP2Z_TRAILING_DATA):
+	   the byte offset and length of the data after the last complete stream,
+	   whether every such byte is zero, and whether it begins as a stream
+	   header would ("B", "BZ", "BZh", or "BZh" with a bad level digit). */
+	uint64_t trailing_offset;
+	uint64_t trailing_length;
+	uint8_t has_trailing;
+	uint8_t trailing_all_zero;
+	uint8_t trailing_partial_header;
 } bzip2z_diagnostics_t;
 
 typedef struct bzip2z_decompress_options {

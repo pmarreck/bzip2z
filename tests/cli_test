@@ -285,6 +285,35 @@ check_diag "parallel -t"
 capture bash -c '"$1" -t <"$2"' _ "$cli" "$damaged"
 check_diag "stdin -t"
 
+# Trailing data: bytes after the last complete stream get their own status
+# and extent. Oracle: we know how many bytes we appended, and where.
+streams_size=$(wc -c <"$big_src.bz2") || die "cannot measure $big_src.bz2"
+check_trailing() {
+	local label="$1" length="$2" shape="$3"
+	if [ "$rc" -ne 1 ]; then
+		fail "$label: trailing data exited $rc"
+		return
+	fi
+	local want="TRAILING_DATA: $length bytes at byte $streams_size after [0-9]+ complete streams? \\($shape\\)$"
+	[[ "$err" =~ $want ]] || fail "$label: expected /$want/ in: $err"
+}
+padded="$work_dir/padded.bz2"
+{ cat "$big_src.bz2"; head -c 100 /dev/zero; } >"$padded" || die "cannot write $padded"
+partial="$work_dir/partial-header.bz2"
+{ cat "$big_src.bz2"; printf 'BZ'; } >"$partial" || die "cannot write $partial"
+foreign="$work_dir/foreign.bz2"
+{ cat "$big_src.bz2"; printf 'not a bzip2 stream'; } >"$foreign" || die "cannot write $foreign"
+for jobs in 1 2; do
+	capture "$cli" -j "$jobs" -t "$padded"
+	check_trailing "-j $jobs -t zero padding" 100 "all zero"
+	capture "$cli" -j "$jobs" -t "$partial"
+	check_trailing "-j $jobs -t partial header" 2 "starts like a stream header"
+	capture "$cli" -j "$jobs" -t "$foreign"
+	check_trailing "-j $jobs -t foreign bytes" 18 "not zero, not a stream header"
+done
+capture bash -c '"$1" -t <"$2"' _ "$cli" "$padded"
+check_trailing "stdin -t zero padding" 100 "all zero"
+
 # Warn, not silently ignore, when the source cannot be removed. Reference
 # bzip2 prints "Couldn't remove" in this case, keeps the output and exits 0.
 # The source must be unremovable while its directory stays writable (the

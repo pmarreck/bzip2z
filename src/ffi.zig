@@ -9,6 +9,8 @@ pub const Bzip2zStatus = enum(c_int) {
 	crc_mismatch = 3,
 	out_of_memory = 4,
 	internal_error = 5,
+	/// Bytes follow a complete stream and do not begin a valid stream header.
+	trailing_data = 6,
 };
 
 pub const Bzip2zBuffer = extern struct {
@@ -37,6 +39,12 @@ pub const Bzip2zDiagnostics = extern struct {
 	has_block_start: u8,
 	has_crc: u8,
 	reserved: u8,
+	// Set when status is trailing_data (has_trailing = 1).
+	trailing_offset: u64,
+	trailing_length: u64,
+	has_trailing: u8,
+	trailing_all_zero: u8,
+	trailing_partial_header: u8,
 
 	fn fromCore(d: core.Diagnostics) Bzip2zDiagnostics {
 		return .{
@@ -55,6 +63,11 @@ pub const Bzip2zDiagnostics = extern struct {
 			.has_block_start = @intFromBool(d.block_start_bit != null),
 			.has_crc = @intFromBool(d.stored_crc != null and d.computed_crc != null),
 			.reserved = 0,
+			.trailing_offset = if (d.trailing) |t| t.offset else 0,
+			.trailing_length = if (d.trailing) |t| t.length else 0,
+			.has_trailing = @intFromBool(d.trailing != null),
+			.trailing_all_zero = if (d.trailing) |t| @intFromBool(t.all_zero) else 0,
+			.trailing_partial_header = if (d.trailing) |t| @intFromBool(t.starts_with_partial_header) else 0,
 		};
 	}
 };
@@ -82,6 +95,7 @@ fn mapError(err: anyerror) Bzip2zStatus {
 	return switch (err) {
 		error.OutOfMemory => .out_of_memory,
 		error.BlockCrcMismatch, error.StreamCrcMismatch => .crc_mismatch,
+		error.TrailingData => .trailing_data,
 		error.InvalidMagic,
 		error.InvalidBlockSize,
 		error.InvalidBlockHeader,
@@ -188,7 +202,7 @@ export fn bzip2z_decompress(
 			if (diagnostics) |d| {
 				// The fast path may be parallel and keeps no positions; locate the
 				// failure with a sequential re-decode, paid only on failure.
-				if (status == .invalid_data or status == .crc_mismatch) {
+				if (status == .invalid_data or status == .crc_mismatch or status == .trailing_data) {
 					if (core.diagnose(std.heap.c_allocator, input)) |found| d.* = .fromCore(found);
 				}
 			}
@@ -312,6 +326,40 @@ test "ffi diagnostics: CRC mismatch reports stored and computed values" {
 	try std.testing.expectEqual(diag.stored_crc ^ diag.computed_crc, @as(u32, 1) << (31 - 5));
 }
 
+test "ffi diagnostics: trailing data reports its own status and extent on both decode paths" {
+	const allocator = std.testing.allocator;
+	const streams = try twoStreamInput(allocator);
+	defer allocator.free(streams);
+	const Case = struct { tail: []const u8, all_zero: u8, partial: u8 };
+	const cases = [_]Case{
+		.{ .tail = "\x00" ** 64, .all_zero = 1, .partial = 0 },
+		.{ .tail = "BZ", .all_zero = 0, .partial = 1 },
+		.{ .tail = "junk after the streams", .all_zero = 0, .partial = 0 },
+	};
+	for (cases) |c| {
+		const input = try std.mem.concat(allocator, u8, &.{ streams, c.tail });
+		defer allocator.free(input);
+		for ([_]bool{ false, true }) |parallel| {
+			var diag: Bzip2zDiagnostics = undefined;
+			try std.testing.expectEqual(@intFromEnum(Bzip2zStatus.trailing_data), decodeWithDiagnostics(input, parallel, true, &diag));
+			try std.testing.expectEqual(@as(u8, 1), diag.valid);
+			try std.testing.expectEqual(@as(u8, 1), diag.has_trailing);
+			try std.testing.expectEqual(@as(u64, streams.len), diag.trailing_offset);
+			try std.testing.expectEqual(@as(u64, c.tail.len), diag.trailing_length);
+			try std.testing.expectEqual(c.all_zero, diag.trailing_all_zero);
+			try std.testing.expectEqual(c.partial, diag.trailing_partial_header);
+			try std.testing.expectEqual(@as(u32, 2), diag.streams);
+		}
+	}
+	// Other failures leave has_trailing clear.
+	const damaged = try allocator.dupe(u8, streams);
+	defer allocator.free(damaged);
+	damaged[(32 + 48 + 5) / 8] ^= @as(u8, 0x80) >> @intCast((32 + 48 + 5) % 8);
+	var diag: Bzip2zDiagnostics = undefined;
+	try std.testing.expectEqual(@intFromEnum(Bzip2zStatus.crc_mismatch), decodeWithDiagnostics(damaged, false, true, &diag));
+	try std.testing.expectEqual(@as(u8, 0), diag.has_trailing);
+}
+
 test "ffi diagnostics: not valid on success or without CRC checking" {
 	const allocator = std.testing.allocator;
 	const input = try twoStreamInput(allocator);
@@ -346,6 +394,7 @@ test "ffi diagnostics: public header matches the exported layout and phase numbe
 	inline for (std.meta.fields(Bzip2zDecompressOptions)) |field| {
 		try std.testing.expectEqual(@offsetOf(h.bzip2z_decompress_options_t, field.name), @offsetOf(Bzip2zDecompressOptions, field.name));
 	}
+	try std.testing.expectEqual(@as(c_int, h.BZIP2Z_TRAILING_DATA), @intFromEnum(Bzip2zStatus.trailing_data));
 	const Phase = bzip2.Diagnostics.Phase;
 	const pairs = .{
 		.{ h.BZIP2Z_PHASE_STREAM_HEADER, Phase.stream_header },

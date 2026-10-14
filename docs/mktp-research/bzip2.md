@@ -414,9 +414,11 @@ recompute a matching CRC.
 
 After a complete stream, the reference `bzip2 -t` exits 0 when the remaining
 data does not start a valid stream (it warns and ignores it). bzip2z reports
-it: 1-3 header bytes are `UnexpectedEof`, longer data `InvalidMagic`. Integrity
-checkers need to see such data, so the divergence is deliberate and is pinned by
-test "differential: trailing garbage is an intentional, documented divergence".
+it as `TrailingData` (until 2026-10-14: `UnexpectedEof` for 1-3 header bytes,
+`InvalidMagic` for longer data), with the data's offset, length, whether it is
+all zero and whether it begins like a stream header. Integrity checkers need to
+see such data, so the divergence is deliberate and is pinned by test
+"differential: trailing garbage is an intentional, documented divergence".
 
 ## Failed or rejected ideas
 

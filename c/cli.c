@@ -207,6 +207,8 @@ static const char* status_name(int status) {
 			return "CRC_MISMATCH";
 		case BZIP2Z_OUT_OF_MEMORY:
 			return "OUT_OF_MEMORY";
+		case BZIP2Z_TRAILING_DATA:
+			return "TRAILING_DATA";
 		case BZIP2Z_INTERNAL_ERROR:
 		default:
 			return "INTERNAL_ERROR";
@@ -218,7 +220,16 @@ static const char* status_name(int status) {
  * hold the damage (bit offsets are MSB-first, so bit 0 is the 0x80 bit). */
 static void print_failure(const char* label, int status, const bzip2z_diagnostics_t* diag) {
 	fprintf(stderr, "%s: %s", label, status_name(status));
-	if (diag != NULL && diag->valid) {
+	if (diag != NULL && diag->valid && diag->has_trailing) {
+		/* Bytes after the last complete stream: say where and what they look
+		 * like, so padding, a cut-off next stream and foreign data differ. */
+		const char* shape = diag->trailing_all_zero ? "all zero"
+			: diag->trailing_partial_header ? "starts like a stream header"
+			: "not zero, not a stream header";
+		fprintf(stderr, ": %llu bytes at byte %llu after %u complete stream%s (%s)",
+			(unsigned long long)diag->trailing_length, (unsigned long long)diag->trailing_offset,
+			(unsigned)diag->streams, diag->streams == 1 ? "" : "s", shape);
+	} else if (diag != NULL && diag->valid) {
 		size_t phase_len = 0;
 		const char* phase = bzip2z_phase_name(diag->phase, &phase_len);
 		if (phase == NULL) {
