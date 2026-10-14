@@ -362,3 +362,71 @@ test "ffi diagnostics: public header matches the exported layout and phase numbe
 	// Every Zig phase has a header constant above.
 	try std.testing.expectEqual(std.meta.fields(Phase).len, pairs.len);
 }
+
+// Basic C ABI contract: round trips, argument validation, ownership. The
+// exports allocate with std.heap.c_allocator, so every returned buffer is
+// released through bzip2z_free.
+
+fn ok(status: c_int) bool {
+	return status == @intFromEnum(Bzip2zStatus.ok);
+}
+
+test "ffi: compress then decompress round-trips a buffer" {
+	const input = "The quick brown fox jumps over the lazy dog. " ** 64;
+
+	var comp: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	try std.testing.expect(ok(bzip2z_compress(input.ptr, input.len, null, &comp)));
+	defer bzip2z_free(comp.ptr, comp.len);
+	try std.testing.expect(comp.len > 0);
+	try std.testing.expect(comp.ptr != null);
+
+	var dec: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	try std.testing.expect(ok(bzip2z_decompress(comp.ptr, comp.len, null, &dec)));
+	defer bzip2z_free(dec.ptr, dec.len);
+	try std.testing.expectEqualSlices(u8, input, dec.ptr.?[0..dec.len]);
+}
+
+test "ffi: empty input compresses and round-trips to empty" {
+	var comp: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	try std.testing.expect(ok(bzip2z_compress(null, 0, null, &comp)));
+	defer bzip2z_free(comp.ptr, comp.len);
+
+	var dec: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	try std.testing.expect(ok(bzip2z_decompress(comp.ptr, comp.len, null, &dec)));
+	defer bzip2z_free(dec.ptr, dec.len);
+	try std.testing.expectEqual(@as(usize, 0), dec.len);
+}
+
+test "ffi: null out_buffer is rejected with invalid_argument" {
+	const data = [_]u8{ 1, 2, 3 };
+	const want = @intFromEnum(Bzip2zStatus.invalid_argument);
+	try std.testing.expectEqual(want, bzip2z_compress(&data, data.len, null, null));
+	try std.testing.expectEqual(want, bzip2z_decompress(&data, data.len, null, null));
+}
+
+test "ffi: null input pointer with nonzero length is invalid_argument" {
+	var out: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	const want = @intFromEnum(Bzip2zStatus.invalid_argument);
+	try std.testing.expectEqual(want, bzip2z_compress(null, 5, null, &out));
+	try std.testing.expectEqual(want, bzip2z_decompress(null, 5, null, &out));
+}
+
+test "ffi: decompressing garbage returns invalid_data, not a crash" {
+	const garbage = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+	var out: Bzip2zBuffer = .{ .ptr = null, .len = 0 };
+	const rc = bzip2z_decompress(&garbage, garbage.len, null, &out);
+	bzip2z_free(out.ptr, out.len);
+	try std.testing.expectEqual(@intFromEnum(Bzip2zStatus.invalid_data), rc);
+}
+
+test "ffi: free of a null pointer is a safe no-op" {
+	bzip2z_free(null, 0);
+	bzip2z_free(null, 100);
+}
+
+test "ffi: version string and length agree with lib.getVersion" {
+	const len = bzip2z_version_string_len();
+	const ptr = bzip2z_version_string();
+	try std.testing.expect(len > 0);
+	try std.testing.expectEqualSlices(u8, lib.getVersion(), ptr[0..len]);
+}
