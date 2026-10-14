@@ -120,7 +120,7 @@ static void usage(const char* program) {
 		" --best              same as -9\n"
 		" -j N                pbzip2-style multi-stream compression and parallel decode using N threads\n"
 		" --size N            hint for stdin input size (enables determinate progress)\n"
-		" --about             show implementation summary\n"
+		" --about             show version and build platform on one line\n"
 		"\n"
 		"Default mode depends on executable name:\n"
 		" bzip2z   => compress\n"
@@ -145,6 +145,35 @@ static void version_info(void) {
 		"This reimplementation: Peter Marreck\n",
 		(int)version_len,
 		version_ptr
+	);
+}
+
+#if defined(_WIN32)
+#define BZIP2Z_TARGET_OS "windows"
+#elif defined(__APPLE__)
+#define BZIP2Z_TARGET_OS "macos"
+#elif defined(__linux__)
+#define BZIP2Z_TARGET_OS "linux"
+#else
+#define BZIP2Z_TARGET_OS "unknown-os"
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+#define BZIP2Z_TARGET_ARCH "x86_64"
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define BZIP2Z_TARGET_ARCH "aarch64"
+#else
+#define BZIP2Z_TARGET_ARCH "unknown-arch"
+#endif
+
+/* --about: one line with the version and the platform this binary was
+ * compiled for (from the compiler's target macros, not the running host). */
+static void about_info(void) {
+	printf(
+		"bzip2z %.*s: bzip2-compatible compressor (Zig core, C CLI over the C FFI); "
+		BZIP2Z_TARGET_OS " " BZIP2Z_TARGET_ARCH "\n",
+		(int)bzip2z_version_string_len(),
+		bzip2z_version_string()
 	);
 }
 
@@ -535,33 +564,6 @@ static void remove_source_or_warn(const char* path) {
 	}
 }
 
-static int run_compress_bytes(
-	const uint8_t* input,
-	size_t input_len,
-	const cli_options_t* opts,
-	bzip2z_buffer_t* output
-) {
-	bzip2z_compress_options_t copt = {0};
-	copt.level = opts->level;
-	copt.threads = opts->threads;
-	copt.multi_stream = opts->pbzip2 ? 1 : 0;
-	return bzip2z_compress(input, input_len, &copt, output);
-}
-
-static int run_decompress_bytes(
-	const uint8_t* input,
-	size_t input_len,
-	const cli_options_t* opts,
-	int check_crc,
-	bzip2z_buffer_t* output
-) {
-	bzip2z_decompress_options_t dopt = {0};
-	dopt.threads = opts->threads;
-	dopt.parallel = (opts->pbzip2 && opts->threads > 1) ? 1 : 0;
-	dopt.check_crc = check_crc ? 1 : 0;
-	return bzip2z_decompress(input, input_len, &dopt, output);
-}
-
 static int compress_file(const char* path, const cli_options_t* opts) {
 	uint8_t* input = NULL;
 	size_t input_len = 0;
@@ -826,7 +828,7 @@ int main(int argc, char** argv) {
 	}
 
 	if (opts.about) {
-		version_info();
+		about_info();
 		file_list_deinit(&files);
 		return 0;
 	}

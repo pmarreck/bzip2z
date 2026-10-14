@@ -188,6 +188,16 @@ rc=0
 capture "$cli" --about
 [ "$rc" -eq 0 ] || fail "--about exited $rc"
 [ -z "$err" ] || fail "--about wrote to stderr: $err"
+# One line naming the version and the platform the binary was built for
+# (this test runs the binary on its build host).
+[ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || fail "--about printed more than one line: $out"
+about_version="$(sed -n 's/^[[:space:]]*\.version = "\(.*\)",$/\1/p' "$root_dir/build.zig.zon")"
+case "$(uname -s)" in Darwin) about_os=macos ;; Linux) about_os=linux ;; *) about_os="$(uname -s)" ;; esac
+case "$(uname -m)" in arm64|aarch64) about_arch=aarch64 ;; *) about_arch="$(uname -m)" ;; esac
+case "$out" in
+	"bzip2z $about_version"[:\ ]*"$about_os $about_arch"*) ;;
+	*) fail "--about should name bzip2z $about_version and $about_os $about_arch: $out" ;;
+esac
 
 # compress file
 capture "$cli" -k "$work_dir/sample.txt"

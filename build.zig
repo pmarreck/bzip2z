@@ -49,9 +49,9 @@ pub fn build(b: *std.Build) void {
 	const progrez_lib = if (!is_windows) progrez_dep.artifact("progrez") else null;
 
 	const cli_c_flags: []const []const u8 = if (!is_windows)
-		&.{ "-std=c11", "-DHAVE_PROGREZ=1" }
+		&.{ "-std=c11", "-DHAVE_PROGREZ=1", "-Werror=unused-function" }
 	else
-		&.{ "-std=c11" };
+		&.{ "-std=c11", "-Werror=unused-function" };
 
 	const cli_mod = b.createModule(.{
 		.target = target,
