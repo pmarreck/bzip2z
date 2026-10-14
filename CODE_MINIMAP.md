@@ -15,6 +15,7 @@
 - src/core.zig: Pure memory-only core API surface for compression/decompression.
 - src/ffi.zig: C ABI adapter that maps C structs/status codes to core operations.
 - src/bzip2.zig: Full algorithm implementation (BWT/MTF/Huffman/RLE), stream/file helpers, parallel paths, and compatibility logic.
+- src/sais.zig: SA-IS (Suffix Array by Induced Sorting) O(n) suffix-array construction used by the BWT; re-exported from bzip2.zig as `buildSuffixArraySAIS`.
 - src/bzip2_test.zig: Unit + interop tests (system bzip2/pbzip2 integration).
 - src/concurrency.zig: Bounded queue for worker threading.
 - c/include/bzip2z.h: Public C header for FFI symbols and options/results.
