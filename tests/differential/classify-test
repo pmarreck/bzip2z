@@ -53,8 +53,10 @@ end
 check("valid single-bit flips of BZh9", table.concat(valid_flips, ","), "BZh1,BZh8")
 
 -- 3. Exit-status decoding through real processes, per binary contract.
+-- The redirect comes first so it also silences os.execute's own shell, which
+-- (as bash 3.2, macOS /bin/sh) reports each signal-killed child on stderr.
 local function run(cmd, contract)
-	return classify.verdict_from_exit(classify.exit_code(os.execute(cmd .. " 2>/dev/null")), contract)
+	return classify.verdict_from_exit(classify.exit_code(os.execute("exec 2>/dev/null; " .. cmd)), contract)
 end
 local ref, ours = classify.CONTRACTS.reference, classify.CONTRACTS.bzip2z
 check("reference exit 0", run("sh -c 'exit 0'", ref), "accept")
