@@ -26,6 +26,10 @@ lane "zig unit tests" zig build test "${zig_test_args[@]}"
 lane "zig corrupt-input tests (ReleaseSafe)" \
 	zig build test -Doptimize=ReleaseSafe -Dtest-filter="corrupt input" "${zig_test_args[@]}"
 
+# The bench executable is not run here, but it must keep compiling: it is
+# outside the test graph, so nothing else notices when a Zig upgrade breaks it.
+lane "bench builds" zig build bench
+
 # Differential sweep classifier (injected verdicts and real exit statuses),
 # and a compile check of the sweep driver itself; the sweep is a separate,
 # bounded campaign: tests/differential/sniper-vs-reference.

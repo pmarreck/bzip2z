@@ -9,29 +9,21 @@
 
 const std = @import("std");
 const bzip2 = @import("bzip2z").bzip2;
+const helpers = @import("test_helpers");
 const Allocator = std.mem.Allocator;
-var tmp_counter = std.atomic.Value(usize).init(0);
+
+// Set by main() from std.process.Init. process.run drives two pipes through a
+// MultiReader, which the global single-threaded io cannot service (it returns
+// OutOfMemory); the runtime-provided io can.
+var runtime_io: std.Io = undefined;
 
 fn benchIo() std.Io {
-	return std.Io.Threaded.global_single_threaded.io();
+	return runtime_io;
 }
 
 fn nowNs() i128 {
 	const ts = std.Io.Clock.Timestamp.now(benchIo(), .awake);
 	return ts.raw.toNanoseconds();
-}
-
-fn getEnvOwned(allocator: Allocator, key: [*:0]const u8) ?[]u8 {
-	const c_val = std.c.getenv(key) orelse return null;
-	const slice = std.mem.span(c_val);
-	return allocator.dupe(u8, slice) catch null;
-}
-
-fn fileWriteAll(file: std.Io.File, data: []const u8) !void {
-	var buf: [4096]u8 = undefined;
-	var w = file.writer(benchIo(), &buf);
-	try w.interface.writeAll(data);
-	try w.interface.flush();
 }
 
 // 0.16 I/O helpers
@@ -51,17 +43,8 @@ fn stderrPrint(comptime fmt: []const u8, args: anytype) void {
 	stderr.flush() catch return;
 }
 
-fn tmpPath(allocator: Allocator, name: []const u8) ![]u8 {
-	const tmpdir_owned = getEnvOwned(allocator, "TMPDIR");
-	defer if (tmpdir_owned) |value| allocator.free(value);
-	const tmpdir = if (tmpdir_owned) |value| value else "/tmp";
-
-	const id = tmp_counter.fetchAdd(1, .seq_cst);
-	return try std.fmt.allocPrint(allocator, "{s}/{s}-{d}", .{ tmpdir, name, id });
-}
-
 fn findPbzip2(allocator: Allocator) ?[]u8 {
-	const path_env = getEnvOwned(allocator, "PATH") orelse return null;
+	const path_env = helpers.getEnvOwned(allocator, "PATH") orelse return null;
 	defer allocator.free(path_env);
 
 	var it = std.mem.splitScalar(u8, path_env, ':');
@@ -270,7 +253,7 @@ const BenchResult = struct {
 /// Benchmark our Zig bzip2 implementation
 fn benchZigBzip2(data: []const u8, options: bzip2.CompressOptions) !BenchResult {
 	// Use standard allocator (memory tracking via GPA is unreliable across Zig versions)
-	var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+	var gpa: std.heap.DebugAllocator(.{}) = .init;
 	defer _ = gpa.deinit();
 	const allocator = gpa.allocator();
 
@@ -308,7 +291,7 @@ fn benchZigBzip2(data: []const u8, options: bzip2.CompressOptions) !BenchResult 
 /// Benchmark system bzip2 via subprocess
 fn benchSystemBzip2(allocator: Allocator, data: []const u8) !BenchResult {
 	// Write to temp file
-	const tmp_path = try tmpPath(allocator, "bench_bzip2_input.dat");
+	const tmp_path = try helpers.tmpPath(allocator, "bench_bzip2_input.dat");
 	defer allocator.free(tmp_path);
 	const bz2_path = try std.fmt.allocPrint(allocator, "{s}.bz2", .{tmp_path});
 	defer allocator.free(bz2_path);
@@ -316,7 +299,7 @@ fn benchSystemBzip2(allocator: Allocator, data: []const u8) !BenchResult {
 	{
 		const file = try std.Io.Dir.cwd().createFile(benchIo(), tmp_path, .{});
 		defer file.close(benchIo());
-		try fileWriteAll(file, data);
+		try helpers.fileWriteAll(file, data);
 	}
 	defer std.Io.Dir.cwd().deleteFile(benchIo(), tmp_path) catch {};
 	defer std.Io.Dir.cwd().deleteFile(benchIo(), bz2_path) catch {};
@@ -362,7 +345,7 @@ fn benchSystemBzip2(allocator: Allocator, data: []const u8) !BenchResult {
 /// Benchmark pbzip2 via subprocess (if available)
 fn benchPbzip2(allocator: Allocator, pbzip2_path: []const u8, data: []const u8, threads: usize) !BenchResult {
 	// Write to temp file
-	const tmp_path = try tmpPath(allocator, "bench_pbzip2_input.dat");
+	const tmp_path = try helpers.tmpPath(allocator, "bench_pbzip2_input.dat");
 	defer allocator.free(tmp_path);
 	const bz2_path = try std.fmt.allocPrint(allocator, "{s}.bz2", .{tmp_path});
 	defer allocator.free(bz2_path);
@@ -370,7 +353,7 @@ fn benchPbzip2(allocator: Allocator, pbzip2_path: []const u8, data: []const u8, 
 	{
 		const file = try std.Io.Dir.cwd().createFile(benchIo(), tmp_path, .{});
 		defer file.close(benchIo());
-		try fileWriteAll(file, data);
+		try helpers.fileWriteAll(file, data);
 	}
 	defer std.Io.Dir.cwd().deleteFile(benchIo(), tmp_path) catch {};
 	defer std.Io.Dir.cwd().deleteFile(benchIo(), bz2_path) catch {};
@@ -432,12 +415,16 @@ fn formatSize(size: usize) struct { value: f64, unit: []const u8 } {
 	}
 }
 
-pub fn main() !u8 {
-	var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+pub fn main(init: std.process.Init) !u8 {
+	runtime_io = init.io;
+	var gpa: std.heap.DebugAllocator(.{}) = .init;
 	defer _ = gpa.deinit();
 	const allocator = gpa.allocator();
 
-	var args_iter = try std.process.argsWithAllocator(allocator);
+	// Zig 0.16: command-line args arrive via the main parameter; there is no
+	// longer a std.process.argsWithAllocator. Host-only bench tool, so the
+	// non-allocating posix iterator is fine.
+	var args_iter = init.minimal.args.iterate();
 	defer args_iter.deinit();
 
 	const args = parseArgs(&args_iter) catch |err| {
