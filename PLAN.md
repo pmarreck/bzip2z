@@ -5,7 +5,7 @@ Completed items: docs/PLAN_LOG.md. Evidence and design notes: docs/mktp-research
 ## Open
 
 - [ ] Replay runner: validate shotgun and nuke reports against a declared domain (seed, cases, corpus hashes, not_run), as it already does for sniper reports.
-- [ ] Awaiting BDFN: typed `trailing_data` finding (offset, length, all-zero flag) for data after a complete stream, so validate can tell it from a damaged second stream (walking decision bzip2z/trailing-data-finding).
+- [ ] Awaiting BDFN: typed `trailing_data` finding (offset, length, all-zero flag) for data after a complete stream, so validate can tell it from a damaged second stream (walking decision bzip2z-trailing-data-finding).
 
 ## Recent
 
