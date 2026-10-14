@@ -3,6 +3,7 @@ ver=1.2
 annotate=[
 	docs/mktp-research/bzip2.md = bzip2 decoder integrity evidence: invariant inventory, differential results, blind class, pins, rejected ideas
 	src/sais.zig = SA-IS (induced sorting) O(n) suffix array for the BWT; re-exported by bzip2.zig
+	src/test_helpers.zig = Shared test/bench helpers: PID+counter temp paths, file writes, env lookup
 	tests/differential/classify-test = Set test of the sweep classifier: all verdict pairs plus real-process exit statuses; run by ./test
 	tests/differential/mutation-test = Controls for mutation.lua: exact Hamming distance, contained windows, nonidentity, splitmix64 known answers
 	tests/differential/mutation.lua = Pure seeded shotgun/nuke mutators (geometry v3) and splitmix64 generator for the differential sweep

@@ -17,6 +17,7 @@
 - src/bzip2.zig: Full algorithm implementation (BWT/MTF/Huffman/RLE), stream/file helpers, parallel paths, and compatibility logic.
 - src/sais.zig: SA-IS (Suffix Array by Induced Sorting) O(n) suffix-array construction used by the BWT; re-exported from bzip2.zig as `buildSuffixArraySAIS`.
 - src/bzip2_test.zig: Unit + interop tests (system bzip2/pbzip2 integration).
+- src/test_helpers.zig: Shared test/bench helpers (temp paths qualified by process id and counter, file writes, env lookup); its own module and test binary.
 - src/concurrency.zig: Bounded queue for worker threading.
 - c/include/bzip2z.h: Public C header for FFI symbols and options/results.
 - c/cli.c: C CLI adapter that performs all I/O and dogfoods the FFI.

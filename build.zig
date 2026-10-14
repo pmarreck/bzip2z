@@ -4,6 +4,15 @@ pub fn build(b: *std.Build) void {
 	const target = b.standardTargetOptions(.{});
 	const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast)") orelse .ReleaseFast;
 
+	// Shared test/bench helpers. A module of their own, so the same source file
+	// is not claimed by both the library tests and the bench executable.
+	const test_helpers_mod = b.createModule(.{
+		.root_source_file = b.path("src/test_helpers.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+
 	const lib_mod = b.addModule("bzip2z", .{
 		.root_source_file = b.path("src/lib.zig"),
 		.target = target,
@@ -140,7 +149,10 @@ pub fn build(b: *std.Build) void {
 		.target = target,
 		.optimize = optimize,
 		.link_libc = true,
-		.imports = &.{.{ .name = "bzip2z_h", .module = header.createModule() }},
+		.imports = &.{
+			.{ .name = "bzip2z_h", .module = header.createModule() },
+			.{ .name = "test_helpers", .module = test_helpers_mod },
+		},
 	});
 	const lib_tests = b.addTest(.{
 		.root_module = lib_test_mod,
@@ -161,6 +173,17 @@ pub fn build(b: *std.Build) void {
 	const test_compile_step = b.step("test-compile", "Compile test binaries without running them");
 	test_compile_step.dependOn(&install_lib_tests.step);
 
+	const helpers_tests = b.addTest(.{
+		.root_module = test_helpers_mod,
+		.filters = test_filters,
+	});
+	if (test_exec) |exec| helpers_tests.setExecCmd(&.{ exec, null });
+	test_step.dependOn(&b.addRunArtifact(helpers_tests).step);
+	test_compile_step.dependOn(&b.addInstallArtifact(helpers_tests, .{
+		.dest_dir = .{ .override = .{ .custom = "test-bins" } },
+		.dest_sub_path = "helpers_tests",
+	}).step);
+
 	const bench_mod = b.createModule(.{
 		.root_source_file = b.path("bench/bench_bzip2.zig"),
 		.target = target,
@@ -168,6 +191,7 @@ pub fn build(b: *std.Build) void {
 		.link_libc = true,
 		.imports = &.{
 			.{ .name = "bzip2z", .module = lib_mod },
+			.{ .name = "test_helpers", .module = test_helpers_mod },
 		},
 	});
 	const bench = b.addExecutable(.{
