@@ -4,6 +4,7 @@ Completed items: docs/PLAN_LOG.md. Evidence and design notes: docs/mktp-research
 
 ## Open
 
+- [ ] flake.nix shellHook prints its "bzip2z dev shell" banner to stdout, which corrupts `nix develop -c tool > file`; send it to stderr.
 - [x] Replay runner validates shotgun and nuke reports: `replay-runner shotgun|nuke` reads MODE-domain.json (seed, cases per stream, not_run, corpus hashes), passes seed and cases to the sweep and derives the trial count; 14 new controls, each new check mutation-killed. (done 2026-10-14 14:50 EDT, df713a2)
 - [x] TrailingData: bytes after a complete stream that do not begin a valid header fail as `error.TrailingData` / `BZIP2Z_TRAILING_DATA` (exit 1) with offset, length, all-zero and partial-header flags in Diagnostics, the C diagnostics struct and the CLI error line; sequential, parallel and stdin paths tested (validate request 2026-10-14). (done 2026-10-14 17:35 EDT)
 

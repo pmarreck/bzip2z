@@ -1,6 +1,7 @@
 # Dirtree: Stateful directory trees in the CLI for humans and LLMs. https://github.com/pmarreck/dirtree
 ver=1.2
 annotate=[
+	MEMORIES = Project-scoped durable lessons (memories skill format); public-safe
 	docs/mktp-research/bzip2.md = bzip2 decoder integrity evidence: invariant inventory, differential results, blind class, pins, rejected ideas
 	src/sais.zig = SA-IS (induced sorting) O(n) suffix array for the BWT; re-exported by bzip2.zig
 	src/test_helpers.zig = Shared test/bench helpers: PID+counter temp paths, file writes, env lookup
